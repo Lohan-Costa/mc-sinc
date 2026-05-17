@@ -33,6 +33,13 @@
     }
     header h1 { margin: 0; font-size: 1.4rem; }
     header h1 small { color: var(--muted); font-weight: normal; margin-left: .5rem; }
+    .header-right { display: flex; align-items: center; gap: 1rem; }
+    #lang-select {
+      background: var(--bg); color: var(--text);
+      border: 1px solid var(--border);
+      padding: .25rem .5rem; border-radius: 4px;
+      font-size: .85rem; cursor: pointer;
+    }
     main { max-width: 960px; margin: 0 auto; padding: 2rem; display: grid; gap: 1.5rem; }
     section.panel {
       background: var(--panel);
@@ -134,41 +141,167 @@
 <body>
   <header>
     <h1>MC Sinc <small id="version"></small></h1>
-    <span id="user-badge" class="empty"></span>
+    <span class="header-right">
+      <select id="lang-select" hidden></select>
+      <span id="user-badge" class="empty"></span>
+    </span>
   </header>
 
   <main>
     <section class="panel">
-      <h2>Status</h2>
+      <h2 id="title-status"></h2>
       <dl class="status-grid">
-        <dt>Usuário</dt><dd id="user">—</dd>
-        <dt>Pasta raiz</dt><dd id="root">—</dd>
-        <dt>Peers na LAN</dt><dd id="peers">—</dd>
-        <dt>Avid</dt><dd id="avid">—</dd>
+        <dt id="label-user"></dt><dd id="user">—</dd>
+        <dt id="label-root"></dt><dd id="root">—</dd>
+        <dt id="label-connected"></dt><dd id="peers">—</dd>
+        <dt id="label-avid"></dt><dd id="avid">—</dd>
       </dl>
     </section>
 
     <section class="panel">
-      <h2>Pendentes</h2>
-      <ul class="files" id="pending"><li class="empty">carregando…</li></ul>
+      <h2 id="title-pending"></h2>
+      <ul class="files" id="pending"><li class="empty"></li></ul>
       <div class="commit-form">
-        <input type="text" id="message" placeholder="mensagem do commit (ex: scenes 12-14)" />
-        <button id="commit-btn">Commit</button>
+        <input type="text" id="message" />
+        <button id="commit-btn"></button>
       </div>
     </section>
 
     <section class="panel">
-      <h2>Commits recebidos</h2>
-      <div class="commit-list" id="received"><div class="empty">carregando…</div></div>
+      <h2 id="title-received"></h2>
+      <div class="commit-list" id="received"><div class="empty"></div></div>
     </section>
 
     <section class="panel">
-      <h2>Commits enviados</h2>
-      <div class="commit-list" id="sent"><div class="empty">carregando…</div></div>
+      <h2 id="title-sent"></h2>
+      <div class="commit-list" id="sent"><div class="empty"></div></div>
     </section>
   </main>
 
   <script>
+    // ===========================================================================
+    // i18n — strings centralizadas por idioma.
+    //
+    // Padrão: adicionar uma língua nova é só apender uma chave em STRINGS com a
+    // mesma forma. O seletor no header aparece automaticamente quando há 2+
+    // entradas. Idioma persistido em localStorage('mcsinc-lang').
+    // ===========================================================================
+    const STRINGS = {
+      'pt-BR': {
+        locale: 'pt-BR',
+
+        // Section titles
+        statusSection: 'Status',
+        pendingSection: 'Pendentes',
+        receivedSection: 'Recebidos',
+        sentSection: 'Enviados',
+
+        // Status card labels
+        labelUser: 'Usuário',
+        labelRoot: 'Pasta raiz',
+        labelConnected: 'Editores(as) conectados(as)',
+        labelAvid: 'Avid',
+        nobodyConnected: 'ninguém ainda',
+
+        // Pendentes
+        loading: 'carregando…',
+        emptyPending: 'sem arquivos pendentes — siga editando.',
+        messagePlaceholder: 'mensagem do envio (ex: cenas 12-14)',
+        sendBtn: 'Enviar',
+
+        // Empty states dos cards
+        emptyReceived: 'ninguém te enviou nada ainda.',
+        emptySent: 'você ainda não enviou nada.',
+
+        // Card commons
+        filesToggle: 'arquivos',
+        noFiles: 'nenhum arquivo',
+        noMessage: 'sem mensagem',
+        downloadBtn: 'Baixar',
+        downloadingBtn: 'Baixando…',
+        retryBtn: 'Tentar novamente',
+
+        // Pluralização. Recebe n; cada língua define a regra que quiser.
+        fileCount: (n) => `${n} arquivo${n === 1 ? '' : 's'}`,
+
+        // Mapeamento dos estados que vêm crus do backend
+        commitStatus: {
+          announced: 'aguardando',
+          pulling: 'baixando',
+          pulled: 'baixado',
+          failed: 'falhou',
+        },
+        avidState: {
+          busy: 'gravando',
+          open_idle: 'aberto (ocioso)',
+          recently_closed: 'fechou há pouco',
+          idle: 'fechado',
+          unknown: 'desconhecido',
+        },
+        avidLastMdb: (formatted) => `último .mdb: ${formatted}`,
+
+        // Alerts
+        alertWriteMsg: 'Escreva uma mensagem antes de enviar.',
+        alertSendFail: 'Falha ao enviar: ',
+        alertPullFail: 'Falha ao baixar: ',
+        alertError: 'Erro: ',
+      },
+      // 'en-US': { ... } — adicionar aqui pra habilitar o seletor.
+    };
+
+    let currentLang = localStorage.getItem('mcsinc-lang') || 'pt-BR';
+    if (!STRINGS[currentLang]) currentLang = 'pt-BR';
+    let t = STRINGS[currentLang];
+
+    function setLanguage(lang) {
+      if (!STRINGS[lang]) return;
+      currentLang = lang;
+      localStorage.setItem('mcsinc-lang', lang);
+      t = STRINGS[lang];
+      document.documentElement.lang = lang;
+      applyStaticStrings();
+      refresh();
+    }
+
+    // Aplica strings nos elementos estáticos (títulos de seção, labels do
+    // status, placeholder do input, texto do botão). Tudo que é re-renderizado
+    // pelo refresh() pega t.foo no template diretamente.
+    function applyStaticStrings() {
+      document.getElementById('title-status').textContent = t.statusSection;
+      document.getElementById('title-pending').textContent = t.pendingSection;
+      document.getElementById('title-received').textContent = t.receivedSection;
+      document.getElementById('title-sent').textContent = t.sentSection;
+
+      document.getElementById('label-user').textContent = t.labelUser;
+      document.getElementById('label-root').textContent = t.labelRoot;
+      document.getElementById('label-connected').textContent = t.labelConnected;
+      document.getElementById('label-avid').textContent = t.labelAvid;
+
+      document.getElementById('message').placeholder = t.messagePlaceholder;
+      document.getElementById('commit-btn').textContent = t.sendBtn;
+
+      // Os <li class="empty"> e <div class="empty"> que começam vazios viram
+      // "carregando…" até o primeiro refresh popular a lista de verdade.
+      document.querySelectorAll('#pending .empty, #received .empty, #sent .empty')
+        .forEach(el => { el.textContent = t.loading; });
+    }
+
+    // Seletor de idioma no header. Só aparece se há 2+ línguas registradas.
+    function initLangSelect() {
+      const langs = Object.keys(STRINGS);
+      if (langs.length <= 1) return;
+      const sel = document.getElementById('lang-select');
+      sel.innerHTML = langs.map(l =>
+        `<option value="${l}" ${l === currentLang ? 'selected' : ''}>${l}</option>`
+      ).join('');
+      sel.hidden = false;
+      sel.addEventListener('change', () => setLanguage(sel.value));
+    }
+
+    // ===========================================================================
+    // Estado local de UI
+    // ===========================================================================
+
     // pullsInFlight rastreia ids cuja UI já mandou POST /pull mas o backend
     // ainda não atualizou o status no SQLite — evita botão Baixar voltar
     // por um tick antes do status virar "pulling".
@@ -180,6 +313,10 @@
     // e renderSentCard.
     const openDetails = new Set();
 
+    // ===========================================================================
+    // Helpers de formatação
+    // ===========================================================================
+
     function fmtSize(bytes) {
       if (bytes < 1024) return bytes + ' B';
       if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
@@ -190,7 +327,7 @@
     function fmtTime(iso) {
       try {
         const d = new Date(iso);
-        return d.toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
+        return d.toLocaleString(t.locale, { dateStyle: 'short', timeStyle: 'short' });
       } catch { return iso; }
     }
 
@@ -206,38 +343,29 @@
     }
 
     function statusLabel(s) {
-      switch (s) {
-        case 'announced': return 'aguardando';
-        case 'pulling':   return 'baixando';
-        case 'pulled':    return 'baixado';
-        case 'failed':    return 'falhou';
-        default:          return s || '?';
-      }
+      return t.commitStatus[s] || s || '?';
     }
 
     function avidLabel(s) {
-      switch (s) {
-        case 'busy':            return 'gravando';
-        case 'open_idle':       return 'aberto (ocioso)';
-        case 'recently_closed': return 'fechou há pouco';
-        case 'idle':            return 'fechado';
-        case 'unknown':         return 'desconhecido';
-        default:                return s || '?';
-      }
+      return t.avidState[s] || s || '?';
     }
+
+    // ===========================================================================
+    // Render
+    // ===========================================================================
 
     function renderAvidBadge(av) {
       if (!av || !av.state) {
-        return '<span class="badge unknown">desconhecido</span>';
+        return `<span class="badge unknown">${escapeHTML(t.avidState.unknown)}</span>`;
       }
       const lastMdb = av.last_mdb_change && av.last_mdb_change !== '0001-01-01T00:00:00Z'
-        ? ` <span class="meta">· último .mdb: ${fmtTime(av.last_mdb_change)}</span>`
+        ? ` <span class="meta">· ${escapeHTML(t.avidLastMdb(fmtTime(av.last_mdb_change)))}</span>`
         : '';
       return `<span class="badge ${escapeHTML(av.state)}">${escapeHTML(avidLabel(av.state))}</span>${lastMdb}`;
     }
 
     function renderFilesList(files) {
-      if (!files || files.length === 0) return '<li class="empty">nenhum arquivo</li>';
+      if (!files || files.length === 0) return `<li class="empty">${escapeHTML(t.noFiles)}</li>`;
       return files.map(f => `
         <li>
           <span>${escapeHTML(f.path)}</span>
@@ -249,8 +377,11 @@
     function renderReceivedCard(c) {
       const uiStatus = pullsInFlight.has(c.id) && c.status === 'announced' ? 'pulling' : c.status;
       const canPull = uiStatus === 'announced' || uiStatus === 'failed';
-      const btnLabel = uiStatus === 'failed' ? 'Tentar novamente' : 'Baixar';
+      const btnLabel = uiStatus === 'failed' ? t.retryBtn : t.downloadBtn;
       const fileCount = (c.files || []).length;
+      const messageHTML = c.message
+        ? escapeHTML(c.message)
+        : `<em class="empty">${escapeHTML(t.noMessage)}</em>`;
 
       return `
         <article class="commit-card" data-id="${escapeHTML(c.id)}">
@@ -261,15 +392,15 @@
             </div>
             <span class="badge ${escapeHTML(uiStatus)}">${escapeHTML(statusLabel(uiStatus))}</span>
           </header>
-          <div class="msg">${escapeHTML(c.message) || '<em class="empty">sem mensagem</em>'}</div>
+          <div class="msg">${messageHTML}</div>
           <div class="summary">
-            <span>${fileCount} arquivo${fileCount === 1 ? '' : 's'} · ${fmtSize(totalSize(c.files))} · ${fmtTime(c.created_at)}</span>
+            <span>${escapeHTML(t.fileCount(fileCount))} · ${fmtSize(totalSize(c.files))} · ${fmtTime(c.created_at)}</span>
             <span class="actions">
-              <button class="pull-btn" data-id="${escapeHTML(c.id)}" ${canPull ? '' : 'disabled'}>${btnLabel}</button>
+              <button class="pull-btn" data-id="${escapeHTML(c.id)}" ${canPull ? '' : 'disabled'}>${escapeHTML(btnLabel)}</button>
             </span>
           </div>
           <details${openDetails.has(c.id) ? ' open' : ''}>
-            <summary>arquivos</summary>
+            <summary>${escapeHTML(t.filesToggle)}</summary>
             <ul class="files">${renderFilesList(c.files)}</ul>
           </details>
         </article>
@@ -278,14 +409,17 @@
 
     function renderSentCard(c) {
       const fileCount = (c.files || []).length;
+      const messageHTML = c.message
+        ? escapeHTML(c.message)
+        : `<em class="empty">${escapeHTML(t.noMessage)}</em>`;
       return `
         <article class="commit-card sent" data-id="${escapeHTML(c.id)}">
           <header class="row">
-            <div class="msg">${escapeHTML(c.message) || '<em class="empty">sem mensagem</em>'}</div>
+            <div class="msg">${messageHTML}</div>
             <span class="meta">${fmtTime(c.created_at)}</span>
           </header>
           <details${openDetails.has(c.id) ? ' open' : ''}>
-            <summary>${fileCount} arquivo${fileCount === 1 ? '' : 's'} · ${fmtSize(totalSize(c.files))}</summary>
+            <summary>${escapeHTML(t.fileCount(fileCount))} · ${fmtSize(totalSize(c.files))}</summary>
             <ul class="files">${renderFilesList(c.files)}</ul>
           </details>
         </article>
@@ -306,12 +440,12 @@
         document.getElementById('user-badge').textContent = '@' + status.user;
         document.getElementById('root').textContent = status.root;
         document.getElementById('peers').textContent =
-          (status.peers && status.peers.length) ? status.peers.join(', ') : 'nenhum ainda';
+          (status.peers && status.peers.length) ? status.peers.join(', ') : t.nobodyConnected;
         document.getElementById('avid').innerHTML = renderAvidBadge(status.avid);
 
         const pendingList = document.getElementById('pending');
         if (!pending || pending.length === 0) {
-          pendingList.innerHTML = '<li class="empty">sem arquivos pendentes — siga editando.</li>';
+          pendingList.innerHTML = `<li class="empty">${escapeHTML(t.emptyPending)}</li>`;
         } else {
           pendingList.innerHTML = pending.map(f =>
             `<li><span>${escapeHTML(f.Path)}</span><span>${fmtSize(f.Size)}</span></li>`
@@ -327,14 +461,14 @@
 
         const receivedList = document.getElementById('received');
         if (!received || received.length === 0) {
-          receivedList.innerHTML = '<div class="empty">nada chegou de peers ainda.</div>';
+          receivedList.innerHTML = `<div class="empty">${escapeHTML(t.emptyReceived)}</div>`;
         } else {
           receivedList.innerHTML = received.map(renderReceivedCard).join('');
         }
 
         const sentList = document.getElementById('sent');
         if (!sent || sent.length === 0) {
-          sentList.innerHTML = '<div class="empty">você ainda não fez commits.</div>';
+          sentList.innerHTML = `<div class="empty">${escapeHTML(t.emptySent)}</div>`;
         } else {
           sentList.innerHTML = sent.map(renderSentCard).join('');
         }
@@ -345,13 +479,13 @@
 
     document.getElementById('commit-btn').addEventListener('click', async () => {
       const msg = document.getElementById('message').value.trim();
-      if (!msg) { alert('Escreva uma mensagem antes de commitar.'); return; }
+      if (!msg) { alert(t.alertWriteMsg); return; }
       const r = await fetch('/commit', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ message: msg }),
       });
-      if (!r.ok) { alert('Falha no commit: ' + await r.text()); return; }
+      if (!r.ok) { alert(t.alertSendFail + await r.text()); return; }
       document.getElementById('message').value = '';
       refresh();
     });
@@ -379,21 +513,25 @@
       if (!id) return;
 
       btn.disabled = true;
-      btn.textContent = 'Baixando…';
+      btn.textContent = t.downloadingBtn;
       pullsInFlight.add(id);
       try {
         const r = await fetch(`/commits/${encodeURIComponent(id)}/pull`, { method: 'POST' });
         if (!r.ok && r.status !== 202) {
-          alert('Falha ao iniciar pull: ' + await r.text());
+          alert(t.alertPullFail + await r.text());
           pullsInFlight.delete(id);
         }
       } catch (e) {
-        alert('Erro: ' + e.message);
+        alert(t.alertError + e.message);
         pullsInFlight.delete(id);
       }
       refresh();
     });
 
+    // Boot
+    document.documentElement.lang = currentLang;
+    applyStaticStrings();
+    initLangSelect();
     refresh();
     setInterval(refresh, 4000);
   </script>
