@@ -76,11 +76,18 @@
 
 ### Avid state (`internal/avid`)
 - Detecta o estado do Avid Media Composer no host atual combinando:
-  - **Processo Avid rodando?** Via `pgrep -f` (Unix) ou `tasklist` (Windows). Nome configurável por `--avid-process-name`.
+  - **Processo Avid rodando?** Via `pgrep -x` (Unix) ou `tasklist` (Windows). Nome configurável por `--avid-process-name`.
   - **Mtime mais recente de `MXF/*/msmMMOB.mdb`** — o Avid atualiza esse arquivo logo após escrita de mídia.
 - Resultado é um `Snapshot` com `State`: `busy` (gravando agora) / `open_idle` (aberto sem escrita) / `recently_closed` (fechou faz <5 min) / `idle` (fechado há tempo bom) / `unknown` (sem `.mdb` e sem processo).
 - Janelas (configuráveis): `BusyWindow = 10s`, `RecentWindow = 5min`.
 - **Não bloqueia nada nesta versão** — surfaceado em `/status` e na UI como informativo. Quando MC Sinc ganhar modo auto-pull/auto-commit, essa primitiva é o gate.
+
+#### Auto-discovery do `--root`
+- Mesmo pacote expõe `DiscoverRoots`, que varre os volumes do host atrás da estrutura `Avid MediaFiles/MXF` na raiz de cada um (regra do Media Composer: nunca em subpasta).
+- macOS: `/Volumes/*` (cada disco montado). Windows: drive letters `A:`..`Z:` via probe `os.Stat`.
+- Candidatos são ordenados pelo mtime mais recente do `.mdb` — o "volume em que você trabalhou por último" vem primeiro.
+- `cmd/mcsinc` chama `DiscoverRoots` quando `--root` não é passado: escolhe o melhor candidato, loga os outros encontrados, ou falha com mensagem útil se zero.
+- Multi-root simultâneo (mcsinc trabalhando com 2 volumes Avid ao mesmo tempo) fica como TODO consciente — refactor pesado em watcher/hasher/transport, vira PR própria quando o caso de uso aparecer em campo.
 
 ### Discovery (`internal/discovery`)
 - mDNS via `hashicorp/mdns`.

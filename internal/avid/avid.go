@@ -143,11 +143,28 @@ func Detect(cfg Config) (Snapshot, error) {
 }
 
 // mostRecentMDB varre MXF/*/msmMMOB.mdb (profundidade 1) e devolve o mtime
-// mais recente. Retorna erro se não achou nenhum .mdb.
+// mais recente. Retorna erro se não achou nenhum .mdb. Wrapper estrito
+// usado por Detect — pra contextos onde "sem .mdb" é uma falha esperada.
 func mostRecentMDB(root string) (time.Time, string, error) {
+	mtime, path, ok, err := mostRecentMDBOptional(root)
+	if err != nil {
+		return time.Time{}, "", err
+	}
+	if !ok {
+		return time.Time{}, "", fmt.Errorf("no %s found under %s", mdbFileName, root)
+	}
+	return mtime, path, nil
+}
+
+// mostRecentMDBOptional tem a mesma varredura, mas trata "nenhum .mdb"
+// como caso normal (ok=false). Usado por DiscoverRoots, onde um volume
+// sem .mdb ainda é um candidato válido (talvez ainda sem mídia).
+//
+// Devolve erro só se a raiz não for legível (problema de configuração).
+func mostRecentMDBOptional(root string) (time.Time, string, bool, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return time.Time{}, "", fmt.Errorf("read root %s: %w", root, err)
+		return time.Time{}, "", false, fmt.Errorf("read root %s: %w", root, err)
 	}
 
 	var (
@@ -170,8 +187,5 @@ func mostRecentMDB(root string) (time.Time, string, error) {
 			found = true
 		}
 	}
-	if !found {
-		return time.Time{}, "", fmt.Errorf("no %s found under %s", mdbFileName, root)
-	}
-	return bestTime, bestRel, nil
+	return bestTime, bestRel, found, nil
 }
