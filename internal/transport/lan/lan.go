@@ -77,11 +77,12 @@ func (t *Transport) Send(ctx context.Context, c *commit.Commit) error {
 		wg.Add(1)
 		go func(peer transport.Peer) {
 			defer wg.Done()
+			log.Printf("lan: announce %s -> %s (peer.Addr=%q)", c.ID, peer.ID, peer.Addr)
 			if err := t.announce(ctx, peer, c); err != nil {
-				log.Printf("lan: announce %s -> %s: %v", c.ID, peer.ID, err)
+				log.Printf("lan: announce %s -> %s FAILED: %v", c.ID, peer.ID, err)
 				return
 			}
-			log.Printf("lan: announced %s -> %s", c.ID, peer.ID)
+			log.Printf("lan: announced %s -> %s OK", c.ID, peer.ID)
 		}(p)
 	}
 	wg.Wait()

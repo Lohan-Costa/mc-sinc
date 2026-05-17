@@ -27,8 +27,11 @@ func (t *Transport) Routes() chi.Router {
 // handleAnnounce recebe um anúncio de commit de outro peer e persiste como
 // direction=received, status=announced. O receiver decide depois se faz pull.
 func (t *Transport) handleAnnounce(w http.ResponseWriter, r *http.Request) {
+	log.Printf("lan: received POST /peer/commits from %s (X-MC-Sinc-User=%q)",
+		r.RemoteAddr, r.Header.Get(userHeader))
 	var c commit.Commit
 	if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
+		log.Printf("lan: announce decode failed: %v", err)
 		http.Error(w, "bad announce body: "+err.Error(), http.StatusBadRequest)
 		return
 	}

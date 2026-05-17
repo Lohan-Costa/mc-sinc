@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"time"
@@ -25,7 +26,11 @@ func (t *Transport) announce(ctx context.Context, peer transport.Peer, c *commit
 	if err != nil {
 		return fmt.Errorf("marshal commit: %w", err)
 	}
+	if peer.Addr == "" {
+		return fmt.Errorf("peer %s sem Addr — discovery não populou", peer.ID)
+	}
 	endpoint := fmt.Sprintf("http://%s/peer/commits", peer.Addr)
+	log.Printf("lan: POST %s (commit=%s, files=%d, body=%dB)", endpoint, c.ID, len(c.Files), len(body))
 
 	annCtx, cancel := context.WithTimeout(ctx, announceTimeout)
 	defer cancel()
@@ -39,7 +44,7 @@ func (t *Transport) announce(ctx context.Context, peer transport.Peer, c *commit
 
 	resp, err := t.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("post: %w", err)
+		return fmt.Errorf("post %s: %w", endpoint, err)
 	}
 	defer resp.Body.Close()
 
