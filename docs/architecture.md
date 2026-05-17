@@ -74,6 +74,15 @@
 - Auth entre peers: LAN-trust nesta versão. Header `X-MC-Sinc-User` viaja como rastro mas não é validado contra mDNS (TODO).
 - A interface foi desenhada para suportar implementações futuras (relay WAN, S3-backed async, etc.) sem mudar o resto do sistema.
 
+### Logging (`internal/logging`)
+- Infra central de observabilidade — toda nova feature emite logs por aqui (sem `log.Printf` direto).
+- Baseado em `log/slog` (stdlib Go) + dois sinks em paralelo: `app.log` (texto, PT-BR) e `app.jsonl` (JSON Lines pra parsing/IA).
+- Rotação via `gopkg.in/natefinch/lumberjack.v2` (20 MB/arquivo, 10 backups, 30 dias).
+- Cada log carrega `session_id` (UUID por execução) e `op_id` (correlation ID que atravessa a rede via header `X-MC-Sinc-Op`).
+- Sanitização automática de paths sensíveis (`$HOME` → `<USER>`, etc.).
+- Mensagens em PT-BR; estrutura técnica (`event_id`, `module`, attrs) em inglês.
+- Detalhes e convenções: [docs/logging.md](logging.md).
+
 ### Avid state (`internal/avid`)
 - Detecta o estado do Avid Media Composer no host atual combinando:
   - **Processo Avid rodando?** Via `pgrep -x` (Unix) ou `tasklist` (Windows). Nome configurável por `--avid-process-name`.
