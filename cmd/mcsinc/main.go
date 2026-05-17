@@ -10,7 +10,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -34,7 +36,7 @@ const version = "0.1.0-alpha"
 
 func main() {
 	var (
-		root        = flag.String("root", "", "caminho da pasta MXF do Avid (obrigatório)")
+		root        = flag.String("root", "", "raiz da pasta MXF do Avid; auto-detectado se omitido")
 		user        = flag.String("user", defaultUser(), "identificador deste editor na rede")
 		port        = flag.Int("port", 7777, "porta do servidor HTTP local")
 		dbP         = flag.String("db", defaultDBPath(), "caminho do SQLite local")
@@ -44,7 +46,11 @@ func main() {
 	flag.Parse()
 
 	if *root == "" {
-		log.Fatal("--root é obrigatório (ex: --root \"/Volumes/Media/Avid MediaFiles/MXF\")")
+		chosen, err := autoDiscoverRoot()
+		if err != nil {
+			log.Fatal(err)
+		}
+		*root = chosen
 	}
 
 	if err := os.MkdirAll(filepath.Dir(*dbP), 0o755); err != nil {
@@ -166,6 +172,35 @@ func defaultDBPath() string {
 		return "manifest.db"
 	}
 	return filepath.Join(home, ".mcsinc", "manifest.db")
+}
+
+// autoDiscoverRoot escaneia volumes conectados procurando pela estrutura
+// "Avid MediaFiles/MXF" na raiz de cada um. Devolve o path do candidato
+// com .mdb mais recente. Os outros encontrados ficam só em log informativo.
+func autoDiscoverRoot() (string, error) {
+	cands, err := avid.DiscoverRoots(avid.Discovery{ListVolumes: avid.ListVolumesPlatform})
+	if err != nil {
+		return "", fmt.Errorf("auto-discovery: %v", err)
+	}
+	if len(cands) == 0 {
+		return "", errors.New(
+			"nenhum 'Avid MediaFiles' encontrado nos volumes conectados. " +
+				"Conecte um disco com a estrutura, ou passe --root manual.")
+	}
+	best := cands[0]
+	log.Printf("auto-discovery: usando %q (volume %q, último .mdb %s)",
+		best.Path, best.VolumeName, lastMDBLabel(best.LastMDBChange))
+	for _, c := range cands[1:] {
+		log.Printf("auto-discovery: também encontrado %q (não usado nesta sessão)", c.Path)
+	}
+	return best.Path, nil
+}
+
+func lastMDBLabel(t time.Time) string {
+	if t.IsZero() {
+		return "nunca usado"
+	}
+	return t.Format(time.RFC3339)
 }
 
 // itoa local para não precisar de strconv só pra isso.
