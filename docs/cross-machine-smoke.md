@@ -46,6 +46,19 @@ A partir daí, é só usar a UI:
 
 ## Troubleshooting
 
+### A janela do PowerShell abre e fecha em 1 segundo, sem aparecer nada
+
+Você rodou via botão direito → "Run with PowerShell" no Explorer. Esse modo abre uma janela nova que fecha sozinha quando o script termina — **mesmo que termine com erro**. Não dá pra ler.
+
+Solução: abra um PowerShell **antes**, navegue até a pasta, e rode de lá:
+
+```powershell
+cd 'S:\caminho\pro\mc-sinc'
+.\scripts\cross-test.ps1
+```
+
+A partir da PR #10 os scripts pausam com `Read-Host` ao final em caso de erro, então mesmo o "Run with PowerShell" mostra a mensagem antes de fechar — mas rodar de um PowerShell aberto continua sendo o jeito mais confortável.
+
 ### Os dois terminais ficam em "aguardando peer" pra sempre
 
 Quase sempre é rede. Confere na ordem:

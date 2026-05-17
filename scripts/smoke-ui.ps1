@@ -1,13 +1,17 @@
-# smoke-ui.ps1 — equivalente Windows do scripts/smoke-ui.sh.
+# smoke-ui.ps1 - equivalente Windows do scripts/smoke-ui.sh.
 #
 # Sobe o MC Sinc, injeta um .mxf fake, simula um commit recebido da "maria",
-# e abre a UI no browser. Útil pra validar que o lado Windows funciona
-# antes de fazer o teste cross-máquina (ver docs/cross-machine-smoke.md).
+# e abre a UI no browser. Util pra validar que o lado Windows funciona
+# antes de fazer o teste cross-maquina (ver docs/cross-machine-smoke.md).
 #
 # Uso:   .\scripts\smoke-ui.ps1
-# Parar: Ctrl+C neste terminal (vai parar o mcsinc também).
+# Parar: Ctrl+C neste terminal (vai parar o mcsinc tambem).
 #
-# Se PowerShell bloquear execução, rode uma vez (admin):
+# IMPORTANTE: o script eh ASCII puro (sem acentos nem chars especiais)
+# porque PowerShell 5.1 sem BOM le como Windows-1252 e o parser quebra
+# com bytes UTF-8 invalidos. Mantenha assim ao editar.
+#
+# Se PowerShell bloquear execucao, rode uma vez:
 #   Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 
 $ErrorActionPreference = 'Stop'
@@ -17,49 +21,41 @@ $TestDir = Join-Path $env:TEMP 'mc-ui'
 $Port    = 7777
 $BinPath = Join-Path $ProjDir 'mcsinc.exe'
 
-Write-Host "-> Build do binário em $ProjDir"
-Set-Location $ProjDir
-& go build -o 'mcsinc.exe' '.\cmd\mcsinc'
-if ($LASTEXITCODE -ne 0) { throw "go build falhou (exit $LASTEXITCODE)" }
-
-Write-Host "-> Limpando $TestDir e recriando estrutura MXF\"
-if (Test-Path $TestDir) { Remove-Item -Recurse -Force $TestDir }
-$MxfDir = Join-Path $TestDir 'MXF\1'
-New-Item -ItemType Directory -Force -Path $MxfDir | Out-Null
-
-Write-Host "-> Gerando um .mxf fake de 5 MB"
-$FakeMxf = Join-Path $MxfDir 'scene01.mxf'
-$bytes = [byte[]]::new(5MB)
-[System.Random]::new().NextBytes($bytes)
-[IO.File]::WriteAllBytes($FakeMxf, $bytes)
-
-# Sobe o mcsinc em background; PID guardado pra parar no final.
-Write-Host "-> Subindo mcsinc em http://localhost:$Port (logs em $TestDir\mcsinc.log)"
-$LogPath = Join-Path $TestDir 'mcsinc.log'
-$ErrPath = Join-Path $TestDir 'mcsinc.err'
-$proc = Start-Process `
-    -FilePath $BinPath `
-    -ArgumentList @(
-        '--root', (Join-Path $TestDir 'MXF'),
-        '--user', 'dev',
-        '--port', "$Port",
-        '--db',   (Join-Path $TestDir 'manifest.db')
-    ) `
-    -PassThru -NoNewWindow `
-    -RedirectStandardOutput $LogPath `
-    -RedirectStandardError  $ErrPath
-
-# Cleanup ao sair (Ctrl+C ou término normal).
-$cleanup = {
-    Write-Host ''
-    Write-Host "-> Parando mcsinc (pid $($proc.Id))"
-    if ($proc -and -not $proc.HasExited) {
-        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-    }
-    if (Test-Path $BinPath) { Remove-Item -Force $BinPath -ErrorAction SilentlyContinue }
-}
+$script:proc = $null
 
 try {
+    Write-Host "-> Build do binario em $ProjDir"
+    Set-Location $ProjDir
+    & go build -o 'mcsinc.exe' '.\cmd\mcsinc'
+    if ($LASTEXITCODE -ne 0) { throw "go build falhou (exit $LASTEXITCODE)" }
+
+    Write-Host "-> Limpando $TestDir e recriando estrutura MXF\"
+    if (Test-Path $TestDir) { Remove-Item -Recurse -Force $TestDir }
+    $MxfDir = Join-Path $TestDir 'MXF\1'
+    New-Item -ItemType Directory -Force -Path $MxfDir | Out-Null
+
+    Write-Host "-> Gerando um .mxf fake de 5 MB"
+    $FakeMxf = Join-Path $MxfDir 'scene01.mxf'
+    $bytes = New-Object 'byte[]' 5MB
+    (New-Object System.Random).NextBytes($bytes)
+    [IO.File]::WriteAllBytes($FakeMxf, $bytes)
+
+    # Sobe o mcsinc em background; PID guardado pra parar no final.
+    Write-Host "-> Subindo mcsinc em http://localhost:$Port (logs em $TestDir\mcsinc.log)"
+    $LogPath = Join-Path $TestDir 'mcsinc.log'
+    $ErrPath = Join-Path $TestDir 'mcsinc.err'
+    $script:proc = Start-Process `
+        -FilePath $BinPath `
+        -ArgumentList @(
+            '--root', (Join-Path $TestDir 'MXF'),
+            '--user', 'dev',
+            '--port', "$Port",
+            '--db',   (Join-Path $TestDir 'manifest.db')
+        ) `
+        -PassThru -NoNewWindow `
+        -RedirectStandardOutput $LogPath `
+        -RedirectStandardError  $ErrPath
+
     # Espera o watcher pegar o arquivo + hasher processar.
     Write-Host "-> Esperando 12s pra watcher + hasher processarem o arquivo"
     Start-Sleep -Seconds 12
@@ -83,7 +79,7 @@ try {
         -ContentType 'application/json' `
         -Body $body | Out-Null
 
-    # Abre a UI no browser padrão.
+    # Abre a UI no browser padrao.
     Write-Host "-> Abrindo http://localhost:$Port no browser"
     Start-Process "http://localhost:$Port"
 
@@ -93,21 +89,37 @@ try {
  MC Sinc rodando. Confira no browser:
 
  [Pendentes]   deve mostrar 1/scene01.mxf (5.0 MB)
- [Enviados]    vazio até você fazer um envio pela UI
- [Recebidos]   deve mostrar @maria com 2 arquivos · 18.0 MB
+ [Enviados]    vazio ate voce fazer um envio pela UI
+ [Recebidos]   deve mostrar @maria com 2 arquivos . 18.0 MB
 
- Sugestões de teste:
+ Sugestoes de teste:
    - Digite uma mensagem e clique Enviar (vai gerar um envio com 0 arquivos
-     porque não fizemos stage explícito — isso é esperado por enquanto).
-   - Clique "Baixar" no card da maria — vai falhar (esperado, peer fake).
+     porque nao fizemos stage explicito - isso eh esperado por enquanto).
+   - Clique "Baixar" no card da maria - vai falhar (esperado, peer fake).
 
  Quando terminar, aperta Ctrl+C aqui pra parar tudo.
 ==============================================================================
 "@
 
-    # Mantém o script vivo enquanto o mcsinc estiver rodando.
-    while (-not $proc.HasExited) { Start-Sleep -Seconds 1 }
+    # Mantem o script vivo enquanto o mcsinc estiver rodando.
+    while (-not $script:proc.HasExited) { Start-Sleep -Seconds 1 }
+}
+catch {
+    Write-Host ""
+    Write-Host "[X] ERRO durante a execucao do script:" -ForegroundColor Red
+    Write-Host "    $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "    em $($_.InvocationInfo.PositionMessage)" -ForegroundColor DarkRed
+    Write-Host ""
+    Read-Host "Pressione Enter para fechar"
+    exit 1
 }
 finally {
-    & $cleanup
+    Write-Host ""
+    if ($script:proc -and -not $script:proc.HasExited) {
+        Write-Host "Encerrando mcsinc (pid $($script:proc.Id))..." -ForegroundColor DarkGray
+        Stop-Process -Id $script:proc.Id -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path $BinPath) {
+        Remove-Item -Force $BinPath -ErrorAction SilentlyContinue
+    }
 }
