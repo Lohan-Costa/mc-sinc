@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MC Sinc</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #1a1d24;
+      --border: #2a2e38;
+      --text: #e6e8eb;
+      --muted: #8b909c;
+      --accent: #4ea1ff;
+      --ok: #4ade80;
+      --warn: #fbbf24;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    header {
+      padding: 1.5rem 2rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+    }
+    header h1 { margin: 0; font-size: 1.4rem; }
+    header h1 small { color: var(--muted); font-weight: normal; margin-left: .5rem; }
+    main { max-width: 960px; margin: 0 auto; padding: 2rem; display: grid; gap: 1.5rem; }
+    section.panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.25rem 1.5rem;
+    }
+    section.panel h2 { margin-top: 0; font-size: 1rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+    .status-grid { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; font-size: .95rem; }
+    .status-grid dt { color: var(--muted); }
+    ul.files { list-style: none; padding: 0; margin: 0; }
+    ul.files li {
+      padding: .6rem 0;
+      border-bottom: 1px solid var(--border);
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-size: .85rem;
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+    ul.files li:last-child { border-bottom: none; }
+    .empty { color: var(--muted); font-style: italic; }
+    button {
+      background: var(--accent); color: #fff; border: 0; padding: .5rem 1rem;
+      border-radius: 6px; cursor: pointer; font-size: .9rem;
+    }
+    button:hover { filter: brightness(1.1); }
+    input[type=text] {
+      background: var(--bg); color: var(--text); border: 1px solid var(--border);
+      padding: .5rem .75rem; border-radius: 6px; flex: 1; font-size: .9rem;
+    }
+    .commit-form { display: flex; gap: .5rem; margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MC Sinc <small id="version"></small></h1>
+    <span id="user-badge" class="empty"></span>
+  </header>
+
+  <main>
+    <section class="panel">
+      <h2>Status</h2>
+      <dl class="status-grid">
+        <dt>Usuário</dt><dd id="user">—</dd>
+        <dt>Pasta raiz</dt><dd id="root">—</dd>
+        <dt>Peers na LAN</dt><dd id="peers">—</dd>
+      </dl>
+    </section>
+
+    <section class="panel">
+      <h2>Pendentes</h2>
+      <ul class="files" id="pending"><li class="empty">carregando…</li></ul>
+      <div class="commit-form">
+        <input type="text" id="message" placeholder="mensagem do commit (ex: scenes 12-14)" />
+        <button id="commit-btn">Commit</button>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    async function refresh() {
+      try {
+        const [status, pending] = await Promise.all([
+          fetch('/status').then(r => r.json()),
+          fetch('/pending').then(r => r.json()),
+        ]);
+
+        document.getElementById('version').textContent = 'v' + status.version;
+        document.getElementById('user').textContent = status.user;
+        document.getElementById('user-badge').textContent = '@' + status.user;
+        document.getElementById('root').textContent = status.root;
+        document.getElementById('peers').textContent =
+          (status.peers && status.peers.length) ? status.peers.join(', ') : 'nenhum ainda';
+
+        const list = document.getElementById('pending');
+        if (!pending || pending.length === 0) {
+          list.innerHTML = '<li class="empty">sem arquivos pendentes — siga editando.</li>';
+        } else {
+          list.innerHTML = pending.map(f =>
+            `<li><span>${f.Path}</span><span>${(f.Size/1e6).toFixed(1)} MB</span></li>`
+          ).join('');
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    document.getElementById('commit-btn').addEventListener('click', async () => {
+      const msg = document.getElementById('message').value.trim();
+      if (!msg) { alert('Escreva uma mensagem antes de commitar.'); return; }
+      const r = await fetch('/commit', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ message: msg }),
+      });
+      if (!r.ok) { alert('Falha no commit: ' + await r.text()); return; }
+      document.getElementById('message').value = '';
+      refresh();
+    });
+
+    refresh();
+    setInterval(refresh, 4000);
+  </script>
+</body>
+</html>
