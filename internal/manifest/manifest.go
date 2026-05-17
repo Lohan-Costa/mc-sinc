@@ -133,3 +133,48 @@ func (s *Store) SetStatus(path string, st Status) error {
 	`, string(st), time.Now().Unix(), path)
 	return err
 }
+
+// SetHash grava o hash e o modified_at observado no momento do hashing.
+// Não toca em status — hash é metadado paralelo ao ciclo discovered/staged/committed.
+func (s *Store) SetHash(path, hash string, modifiedAt time.Time) error {
+	_, err := s.db.Exec(`
+		UPDATE files
+		SET hash = ?, modified_at = ?, updated_at = ?
+		WHERE path = ?
+	`, hash, modifiedAt.Unix(), time.Now().Unix(), path)
+	return err
+}
+
+// NeedsHash devolve files que ainda não têm hash calculado.
+// Re-hash por mudança de mtime fica a cargo do worker (próxima iteração).
+func (s *Store) NeedsHash() ([]File, error) {
+	rows, err := s.db.Query(`
+		SELECT path, hash, size, modified_at, status, updated_at
+		FROM files
+		WHERE hash = ''
+		ORDER BY updated_at ASC
+		LIMIT 100
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []File
+	for rows.Next() {
+		var (
+			f          File
+			modifiedAt int64
+			updatedAt  int64
+			status     string
+		)
+		if err := rows.Scan(&f.Path, &f.Hash, &f.Size, &modifiedAt, &status, &updatedAt); err != nil {
+			return nil, err
+		}
+		f.ModifiedAt = time.Unix(modifiedAt, 0)
+		f.UpdatedAt = time.Unix(updatedAt, 0)
+		f.Status = Status(status)
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}

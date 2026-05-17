@@ -5,19 +5,19 @@
 ## Visão de 30 segundos
 
 ```
-┌───────────────────────────────────────────────────────────────┐
-│                          mcsinc (binário único)               │
-│                                                               │
-│  ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌────────────┐  │
-│  │ Watcher  │──▶│ Manifest │◀──│  Commit  │──▶│ Transport  │──┼─▶ peers
-│  │ fsnotify │   │  SQLite  │   │ service  │   │  (LAN…)    │  │
-│  └──────────┘   └──────────┘   └──────────┘   └────────────┘  │
-│        ▲             ▲              ▲              ▲          │
-│        │             │              │              │          │
-│        └─────────── HTTP API (chi) ──┴──────────────┘          │
-│                          │                                    │
-│                     UI web local                              │
-└───────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                          mcsinc (binário único)                        │
+│                                                                        │
+│  ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────┐  │
+│  │ Watcher  │──▶│ Manifest │◀──│  Hasher  │   │  Commit  │──▶│Transp│──┼─▶ peers
+│  │ fsnotify │   │  SQLite  │   │ xxhash64 │   │ service  │   │(LAN…)│  │
+│  └──────────┘   └──────────┘   └──────────┘   └──────────┘   └──────┘  │
+│        ▲             ▲              ▲              ▲             ▲     │
+│        │             │              │              │             │     │
+│        └────────── HTTP API (chi) ──┴──────────────┴─────────────┘     │
+│                          │                                             │
+│                     UI web local                                       │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Componentes
@@ -26,7 +26,15 @@
 - Usa `fsnotify` para observar **uma única subpasta** dentro de `MXF/` — a do usuário corrente (ex.: `MXF/1`).
 - Filtra por extensão `.mxf`.
 - Aplica **debounce de 3 segundos**: o Avid escreve mídia em chunks e gera dezenas de eventos por arquivo. O debounce garante que o arquivo está "quiescente" antes do MC Sinc considerá-lo pronto.
-- Não tenta calcular hash no watcher — isso fica para um worker separado (não implementado ainda).
+- Não tenta calcular hash no watcher — isso fica a cargo do `hasher`.
+
+### Hasher (`internal/hasher`)
+- Worker em background que calcula `xxhash64` dos arquivos `.mxf` registrados no manifest.
+- **Polling a cada 5s** (`DefaultInterval`): pergunta ao manifest quais arquivos têm `hash = ''` e processa em série.
+- Por que serial: hash de `.mxf` é I/O-bound no mesmo volume em que o Avid está escrevendo. Paralelismo não acelera e atrapalha o editor.
+- Erros (arquivo sumiu, locked) são logados; a próxima passada tenta de novo — o worker é idempotente.
+- Hash é metadado: **não muda `status`**. O ciclo `discovered → staged → committed` continua sendo decisão humana.
+- TODO: re-hash quando o `mtime` do arquivo no disco diverge do registrado no manifest (Avid raramente reescreve `.mxf`, mas pode acontecer em recapture).
 
 ### Manifest (`internal/manifest`)
 - Banco SQLite via `modernc.org/sqlite` (pure Go, sem CGO — facilita cross-compile).
@@ -98,7 +106,8 @@ Cada peer publica sua mídia numa subpasta `MXF/1-<user>`. Isso:
 
 ## O que ainda não está implementado
 
-- [ ] Cálculo de hash em background.
+- [x] Cálculo de hash em background.
+- [ ] Re-hash quando mtime do arquivo muda.
 - [ ] Transferência HTTP real entre peers.
 - [ ] Pull com confirmação na UI.
 - [ ] Renomeação automática quando um arquivo veio de um peer.

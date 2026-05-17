@@ -22,6 +22,7 @@ import (
 	"github.com/Lohan-Costa/mc-sinc/internal/api"
 	"github.com/Lohan-Costa/mc-sinc/internal/commit"
 	"github.com/Lohan-Costa/mc-sinc/internal/discovery"
+	"github.com/Lohan-Costa/mc-sinc/internal/hasher"
 	"github.com/Lohan-Costa/mc-sinc/internal/manifest"
 	"github.com/Lohan-Costa/mc-sinc/internal/watcher"
 	"github.com/Lohan-Costa/mc-sinc/internal/web"
@@ -66,6 +67,8 @@ func main() {
 		log.Fatalf("criando watcher: %v", err)
 	}
 
+	h := hasher.New(store, *root)
+
 	webRoot, err := web.FS()
 	if err != nil {
 		log.Fatalf("preparando UI: %v", err)
@@ -107,6 +110,12 @@ func main() {
 	go func() {
 		if err := w.Run(ctx); err != nil {
 			log.Printf("watcher: %v", err)
+		}
+	}()
+
+	go func() {
+		if err := h.Run(ctx); err != nil {
+			log.Printf("hasher: %v", err)
 		}
 	}()
 
