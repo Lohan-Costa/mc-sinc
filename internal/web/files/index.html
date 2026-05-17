@@ -115,8 +115,16 @@
     .badge.pulled    { background: rgba(74,222,128,.15); color: var(--ok); }
     .badge.failed    { background: rgba(248,113,113,.15); color: var(--danger); }
 
+    /* Avid state — cores diferentes por estado */
+    .badge.busy            { background: rgba(248,113,113,.15); color: var(--danger); }
+    .badge.open_idle       { background: rgba(251,191,36,.15); color: var(--warn); }
+    .badge.recently_closed { background: #2a2e38; color: var(--muted); }
+    .badge.idle            { background: rgba(74,222,128,.15); color: var(--ok); }
+    .badge.unknown         { background: #2a2e38; color: var(--muted); }
+
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
     .badge.pulling { animation: pulse 1.6s ease-in-out infinite; }
+    .badge.busy    { animation: pulse 1.6s ease-in-out infinite; }
 
     /* Commits enviados ficam mais compactos */
     .commit-card.sent { padding: .65rem 1rem; }
@@ -136,6 +144,7 @@
         <dt>Usuário</dt><dd id="user">—</dd>
         <dt>Pasta raiz</dt><dd id="root">—</dd>
         <dt>Peers na LAN</dt><dd id="peers">—</dd>
+        <dt>Avid</dt><dd id="avid">—</dd>
       </dl>
     </section>
 
@@ -204,6 +213,27 @@
         case 'failed':    return 'falhou';
         default:          return s || '?';
       }
+    }
+
+    function avidLabel(s) {
+      switch (s) {
+        case 'busy':            return 'gravando';
+        case 'open_idle':       return 'aberto (ocioso)';
+        case 'recently_closed': return 'fechou há pouco';
+        case 'idle':            return 'fechado';
+        case 'unknown':         return 'desconhecido';
+        default:                return s || '?';
+      }
+    }
+
+    function renderAvidBadge(av) {
+      if (!av || !av.state) {
+        return '<span class="badge unknown">desconhecido</span>';
+      }
+      const lastMdb = av.last_mdb_change && av.last_mdb_change !== '0001-01-01T00:00:00Z'
+        ? ` <span class="meta">· último .mdb: ${fmtTime(av.last_mdb_change)}</span>`
+        : '';
+      return `<span class="badge ${escapeHTML(av.state)}">${escapeHTML(avidLabel(av.state))}</span>${lastMdb}`;
     }
 
     function renderFilesList(files) {
@@ -277,6 +307,7 @@
         document.getElementById('root').textContent = status.root;
         document.getElementById('peers').textContent =
           (status.peers && status.peers.length) ? status.peers.join(', ') : 'nenhum ainda';
+        document.getElementById('avid').innerHTML = renderAvidBadge(status.avid);
 
         const pendingList = document.getElementById('pending');
         if (!pending || pending.length === 0) {
