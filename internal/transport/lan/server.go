@@ -36,6 +36,8 @@ func (t *Transport) handleAnnounce(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if c.ID == "" || c.Author == "" || len(c.Files) == 0 {
+		log.Printf("lan: REJEITADO announce vazio (id=%q author=%q files=%d) "+
+			"- provavel UI do sender sem stage", c.ID, c.Author, len(c.Files))
 		http.Error(w, "announce missing id, author or files", http.StatusBadRequest)
 		return
 	}

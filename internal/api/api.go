@@ -20,6 +20,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -120,7 +121,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Root:        s.root,
 		ProcessName: s.avidProcess,
 	})
-	if err != nil {
+	// "no msmMMOB.mdb found" é esperado em pasta fake/Avid sem mídia ainda —
+	// não polui o log. snap.State == "unknown" já comunica isso na wire.
+	if err != nil && !strings.Contains(err.Error(), "no msmMMOB.mdb") {
 		log.Printf("api: avid.Detect: %v", err)
 	}
 
@@ -173,6 +176,23 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	// TODO(ui): a UI ainda não tem botão Stage por arquivo. Enquanto isso,
+	// "Enviar" = stage de tudo que está em 'discovered' (com hash já calculado)
+	// + commit + announce. Arquivos sem hash são pulados — entram no próximo
+	// Enviar quando o hasher passar. Quando o botão Stage entrar (PR futura),
+	// esse bloco vira opt-out (ex: ?stage=auto) ou sai.
+	if discovered, derr := s.store.ByStatus(manifest.StatusDiscovered); derr == nil {
+		for _, f := range discovered {
+			if f.Hash == "" {
+				continue
+			}
+			if err := s.commits.Stage(r.Context(), f.Path); err != nil {
+				log.Printf("api: auto-stage %s: %v", f.Path, err)
+			}
+		}
+	}
+
 	c, err := s.commits.Commit(r.Context(), req.Message)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
