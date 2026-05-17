@@ -27,21 +27,21 @@ const (
 
 // Commit representa uma linha da tabela `commits`.
 type Commit struct {
-	ID        string
-	Author    string
-	Message   string
-	CreatedAt time.Time
-	Direction Direction
-	PeerAddr  string // só relevante para Direction=received; host:port do sender
-	Status    CommitStatus
-	Files     []CommitFile // populado por GetCommit / ListCommits quando o caller pede
+	ID        string       `json:"id"`
+	Author    string       `json:"author"`
+	Message   string       `json:"message"`
+	CreatedAt time.Time    `json:"created_at"`
+	Direction Direction    `json:"direction"`
+	PeerAddr  string       `json:"peer_addr"` // só relevante para Direction=received; host:port do sender
+	Status    CommitStatus `json:"status"`
+	Files     []CommitFile `json:"files"` // populado por GetCommit / ListCommits
 }
 
 // CommitFile é uma linha de `commit_files`.
 type CommitFile struct {
-	Path string
-	Hash string
-	Size int64
+	Path string `json:"path"`
+	Hash string `json:"hash"`
+	Size int64  `json:"size"`
 }
 
 // ErrCommitNotFound é retornado quando GetCommit não encontra o id pedido.
@@ -136,7 +136,9 @@ func (s *Store) CommitFiles(commitID string) ([]CommitFile, error) {
 }
 
 // ListCommits filtra por direção. Se status != "", filtra também por status.
-// Os arquivos NÃO são populados (uma query por commit é caro pra listas).
+// Files são populados (N+1 query) — aceitável porque N tende a ser pequeno
+// nesta ferramenta (dezenas, não milhares); permite ao consumer mostrar
+// contagem de arquivos e size total sem segunda viagem.
 func (s *Store) ListCommits(dir Direction, status CommitStatus) ([]Commit, error) {
 	query := `
 		SELECT id, author, message, created_at, direction, peer_addr, status
@@ -171,7 +173,18 @@ func (s *Store) ListCommits(dir Direction, status CommitStatus) ([]Commit, error
 		c.Status = CommitStatus(status)
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	for i := range out {
+		files, err := s.CommitFiles(out[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		out[i].Files = files
+	}
+	return out, nil
 }
 
 // UpdateCommitStatus muda o status de um commit (ex: announced → pulling → pulled).

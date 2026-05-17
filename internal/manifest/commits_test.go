@@ -98,6 +98,9 @@ func TestListCommits_FiltersByDirectionAndStatus(t *testing.T) {
 	if len(sent) != 1 || sent[0].ID != "a" {
 		t.Errorf("sent: %+v", sent)
 	}
+	if len(sent[0].Files) != 2 {
+		t.Errorf("Files deve vir populado em ListCommits; got %d files", len(sent[0].Files))
+	}
 
 	allRecv, _ := store.ListCommits(DirectionReceived, "")
 	if len(allRecv) != 2 {
