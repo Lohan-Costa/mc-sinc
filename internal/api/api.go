@@ -4,6 +4,7 @@
 //
 //	GET  /status   → estado geral do nó (user, root, peers, contadores)
 //	GET  /pending  → arquivos detectados aguardando decisão do usuário
+//	POST /stage    → marca um arquivo para entrar no próximo commit
 //	POST /commit   → executa um commit dos arquivos staged
 //	GET  /         → serve a UI web (web/index.html)
 package api
@@ -64,6 +65,7 @@ func (s *Server) Handler() http.Handler {
 
 	r.Get("/status", s.handleStatus)
 	r.Get("/pending", s.handlePending)
+	r.Post("/stage", s.handleStage)
 	r.Post("/commit", s.handleCommit)
 
 	if s.web != nil {
@@ -101,6 +103,27 @@ func (s *Server) handlePending(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, files)
+}
+
+type stageRequest struct {
+	Path string `json:"path"`
+}
+
+func (s *Server) handleStage(w http.ResponseWriter, r *http.Request) {
+	var req stageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Path == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+	if err := s.commits.Stage(r.Context(), req.Path); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 type commitRequest struct {
