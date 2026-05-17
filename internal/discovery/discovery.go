@@ -32,7 +32,17 @@ const (
 	domain      = "local."
 	browseEvery = 10 * time.Second
 	browseRound = 3 * time.Second
+
+	// peerTTL: peer sem ser visto por mais de peerTTL é considerado offline.
+	// 30s = 3x browseEvery, tolera 1 round perdida sem sumir cedo demais.
+	peerTTL = 30 * time.Second
 )
+
+// peerState carrega o último Peer visto + quando.
+type peerState struct {
+	peer     transport.Peer
+	lastSeen time.Time
+}
 
 // Discovery cuida do anúncio + browse simultâneos do serviço mDNS.
 type Discovery struct {
@@ -43,7 +53,7 @@ type Discovery struct {
 	server *zeroconf.Server
 
 	mu    sync.RWMutex
-	peers map[string]transport.Peer
+	peers map[string]*peerState
 }
 
 // New configura mas não inicia o discovery.
@@ -52,7 +62,7 @@ func New(user string, port int, version string) *Discovery {
 		user:    user,
 		port:    port,
 		version: version,
-		peers:   make(map[string]transport.Peer),
+		peers:   make(map[string]*peerState),
 	}
 }
 
@@ -127,7 +137,7 @@ func (d *Discovery) browseOnce(parent context.Context) {
 			continue
 		}
 		d.mu.Lock()
-		d.peers[p.ID] = p
+		d.peers[p.ID] = &peerState{peer: p, lastSeen: time.Now()}
 		d.mu.Unlock()
 	}
 }
@@ -144,13 +154,19 @@ func addressFrom(e *zeroconf.ServiceEntry) string {
 	return ""
 }
 
-// Peers devolve um snapshot dos peers descobertos.
+// Peers devolve um snapshot dos peers descobertos cujo lastSeen
+// é mais recente que peerTTL. Peers stale são filtrados no read e
+// continuam no map até a próxima atualização ou um GC futuro.
 func (d *Discovery) Peers() []transport.Peer {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
+	cutoff := time.Now().Add(-peerTTL)
 	out := make([]transport.Peer, 0, len(d.peers))
-	for _, p := range d.peers {
-		out = append(out, p)
+	for _, st := range d.peers {
+		if st.lastSeen.Before(cutoff) {
+			continue
+		}
+		out = append(out, st.peer)
 	}
 	return out
 }
