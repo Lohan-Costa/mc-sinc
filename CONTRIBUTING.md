@@ -18,7 +18,7 @@ go build -o mcsinc ./cmd/mcsinc
 ```
 
 Requisitos:
-- Go 1.22+
+- Go 1.25+
 - Sem CGO (todo o build é pure Go — `modernc.org/sqlite` substitui `mattn/go-sqlite3`).
 
 ## Padrão de código
