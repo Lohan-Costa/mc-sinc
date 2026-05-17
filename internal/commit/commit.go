@@ -19,14 +19,22 @@ import (
 	"github.com/Lohan-Costa/mc-sinc/internal/manifest"
 )
 
+// FileSpec descreve um arquivo do commit com a metadata mínima
+// necessária pro receiver decidir pull e validar integridade depois.
+type FileSpec struct {
+	Path string `json:"path"` // caminho relativo à pasta MXF do sender
+	Hash string `json:"hash"` // xxhash64 hex, 16 chars
+	Size int64  `json:"size"` // bytes
+}
+
 // Commit é um snapshot anunciado: um conjunto de arquivos staged que viram
 // uma unidade lógica de sincronização.
 type Commit struct {
-	ID        string    // identificador opaco, 16 bytes hex
-	Author    string    // identificador do editor que fez o commit
-	Message   string    // mensagem livre — "scenes 12-14 sound design"
-	Files     []string  // paths relativos à pasta MXF
-	CreatedAt time.Time
+	ID        string     `json:"id"`         // identificador opaco, 16 bytes hex
+	Author    string     `json:"author"`     // identificador do editor que fez o commit
+	Message   string     `json:"message"`    // mensagem livre — "scenes 12-14 sound design"
+	Files     []FileSpec `json:"files"`      // paths + hash + size, relativos à pasta MXF do sender
+	CreatedAt time.Time  `json:"created_at"`
 }
 
 // Service orquestra staging e commits sobre o manifest local.
@@ -52,25 +60,32 @@ func (s *Service) Unstage(ctx context.Context, path string) error {
 
 // Commit consome todos os arquivos em status `staged` e os marca como `committed`,
 // devolvendo o Commit resultante. Não envia nada pela rede — isso é tarefa do transport.
+//
+// Arquivos staged sem hash calculado são pulados: sem hash, o receiver não tem como
+// validar integridade. Eles permanecem staged e entram no próximo commit assim que
+// o hasher os processar.
 func (s *Service) Commit(ctx context.Context, message string) (*Commit, error) {
 	staged, err := s.store.ByStatus(manifest.StatusStaged)
 	if err != nil {
 		return nil, err
 	}
 
-	paths := make([]string, 0, len(staged))
+	files := make([]FileSpec, 0, len(staged))
 	for _, f := range staged {
+		if f.Hash == "" {
+			continue
+		}
 		if err := s.store.SetStatus(f.Path, manifest.StatusCommitted); err != nil {
 			return nil, err
 		}
-		paths = append(paths, f.Path)
+		files = append(files, FileSpec{Path: f.Path, Hash: f.Hash, Size: f.Size})
 	}
 
 	return &Commit{
 		ID:        newID(),
 		Author:    s.user,
 		Message:   message,
-		Files:     paths,
+		Files:     files,
 		CreatedAt: time.Now(),
 	}, nil
 }
