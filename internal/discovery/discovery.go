@@ -7,16 +7,22 @@
 //   - versão do MC Sinc
 //
 // Outros nós escutam o mesmo serviço e populam um cache de Peers.
+//
+// Esta implementação usa `libp2p/zeroconf/v2` em vez de `hashicorp/mdns`
+// (que tinha problema conhecido no macOS: o `mDNSResponder` do SO segura
+// a porta UDP 5353, e o hashicorp/mdns não consegue receber respostas de
+// browse — só o advertise saía. zeroconf coexiste corretamente).
 package discovery
 
 import (
 	"context"
 	"fmt"
-	"os"
+	"log"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/hashicorp/mdns"
+	"github.com/libp2p/zeroconf/v2"
 
 	"github.com/Lohan-Costa/mc-sinc/internal/transport"
 )
@@ -25,6 +31,7 @@ const (
 	serviceName = "_mcsinc._tcp"
 	domain      = "local."
 	browseEvery = 10 * time.Second
+	browseRound = 3 * time.Second
 )
 
 // Discovery cuida do anúncio + browse simultâneos do serviço mDNS.
@@ -33,7 +40,7 @@ type Discovery struct {
 	port    int
 	version string
 
-	server *mdns.Server
+	server *zeroconf.Server
 
 	mu    sync.RWMutex
 	peers map[string]transport.Peer
@@ -51,33 +58,27 @@ func New(user string, port int, version string) *Discovery {
 
 // Run inicia anúncio + browse. Bloqueia até `ctx` ser cancelado.
 func (d *Discovery) Run(ctx context.Context) error {
-	host, _ := os.Hostname()
-
-	svc, err := mdns.NewMDNSService(
-		d.user,                                 // instance name
-		serviceName,                            // service
-		domain,                                 // domain
-		host+".",                               // host
-		d.port,                                 // port
-		nil,                                    // IPs (auto)
-		[]string{"user=" + d.user, "v=" + d.version}, // TXT records
+	server, err := zeroconf.Register(
+		d.user,                                         // instance name
+		serviceName,                                    // service type
+		domain,                                         // domain
+		d.port,                                         // port HTTP
+		[]string{"user=" + d.user, "v=" + d.version},   // TXT records
+		nil,                                            // ifaces — nil = todas
 	)
 	if err != nil {
-		return fmt.Errorf("mdns service: %w", err)
-	}
-
-	server, err := mdns.NewServer(&mdns.Config{Zone: svc})
-	if err != nil {
-		return fmt.Errorf("mdns server: %w", err)
+		return fmt.Errorf("zeroconf register: %w", err)
 	}
 	d.server = server
+	defer d.server.Shutdown()
 
 	go d.browseLoop(ctx)
 
 	<-ctx.Done()
-	return d.server.Shutdown()
+	return nil
 }
 
+// browseLoop chama browseOnce a cada `browseEvery`.
 func (d *Discovery) browseLoop(ctx context.Context) {
 	tick := time.NewTicker(browseEvery)
 	defer tick.Stop()
@@ -93,35 +94,54 @@ func (d *Discovery) browseLoop(ctx context.Context) {
 	}
 }
 
-func (d *Discovery) browseOnce(ctx context.Context) {
-	entries := make(chan *mdns.ServiceEntry, 16)
-	params := mdns.DefaultParams(serviceName)
-	params.Entries = entries
-	params.Timeout = 3 * time.Second
+// browseOnce roda uma janela de `browseRound` segundos consumindo entries.
+// O context.WithTimeout encerra o Browse — a goroutine de produção do
+// zeroconf fecha o canal e o for-range sai naturalmente.
+func (d *Discovery) browseOnce(parent context.Context) {
+	ctx, cancel := context.WithTimeout(parent, browseRound)
+	defer cancel()
 
+	entries := make(chan *zeroconf.ServiceEntry, 16)
 	go func() {
-		_ = mdns.Query(params)
-		close(entries)
+		if err := zeroconf.Browse(ctx, serviceName, domain, entries); err != nil {
+			log.Printf("discovery: browse: %v", err)
+		}
 	}()
 
 	for e := range entries {
 		p := transport.Peer{
-			ID:   e.Name,
-			Name: e.Host,
-			Addr: fmt.Sprintf("%s:%d", e.AddrV4, e.Port),
+			ID:   e.Instance,
+			Name: e.HostName,
+			Addr: addressFrom(e),
 		}
-		for _, txt := range e.InfoFields {
-			if len(txt) > 5 && txt[:5] == "user=" {
-				p.ID = txt[5:]
+		for _, txt := range e.Text {
+			switch {
+			case strings.HasPrefix(txt, "user="):
+				p.ID = strings.TrimPrefix(txt, "user=")
+			case strings.HasPrefix(txt, "v="):
+				p.Version = strings.TrimPrefix(txt, "v=")
 			}
-			if len(txt) > 2 && txt[:2] == "v=" {
-				p.Version = txt[2:]
-			}
+		}
+		// Ignora o próprio anúncio — o zeroconf devolve o self também.
+		if p.ID == d.user {
+			continue
 		}
 		d.mu.Lock()
 		d.peers[p.ID] = p
 		d.mu.Unlock()
 	}
+}
+
+// addressFrom monta "host:port" priorizando IPv4 (mais comum em LAN
+// doméstica) com fallback IPv6.
+func addressFrom(e *zeroconf.ServiceEntry) string {
+	if len(e.AddrIPv4) > 0 {
+		return fmt.Sprintf("%s:%d", e.AddrIPv4[0], e.Port)
+	}
+	if len(e.AddrIPv6) > 0 {
+		return fmt.Sprintf("[%s]:%d", e.AddrIPv6[0], e.Port)
+	}
+	return ""
 }
 
 // Peers devolve um snapshot dos peers descobertos.

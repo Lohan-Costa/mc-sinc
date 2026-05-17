@@ -90,10 +90,11 @@
 - Multi-root simultâneo (mcsinc trabalhando com 2 volumes Avid ao mesmo tempo) fica como TODO consciente — refactor pesado em watcher/hasher/transport, vira PR própria quando o caso de uso aparecer em campo.
 
 ### Discovery (`internal/discovery`)
-- mDNS via `hashicorp/mdns`.
+- mDNS via `libp2p/zeroconf/v2` (substituiu `hashicorp/mdns` na PR #9 por problemas de coexistência com o `mDNSResponder` do macOS — o daemon do sistema segurava UDP 5353, advertise saía mas browse não recebia respostas).
 - Service name: `_mcsinc._tcp.local.`
 - TXT records: `user=<id>`, `v=<versão>`.
-- Browse a cada 10s; mantém um cache thread-safe de peers.
+- Browse a cada 10s (janela de 3s por iteração); mantém um cache thread-safe de peers.
+- Filtra o self-instance pelo TXT `user=` pra não auto-anunciar como peer.
 
 ### API HTTP (`internal/api`)
 - Servidor `go-chi/chi` v5 ouvindo em `:7777` por default.
