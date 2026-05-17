@@ -51,15 +51,27 @@
 
 - Status é uma máquina de estados muito simples — não há transições proibidas (ainda); o serviço de commit é quem dita as regras.
 
+- Tabela `commits` (introduzida na PR #2): persiste anúncios enviados (`direction=sent`) e recebidos (`direction=received`) com status `announced` → `pulling` → `pulled`/`failed`.
+- Tabela `commit_files`: lista de `(commit_id, path, hash, size)`. Permite ao sender autorizar `/peer/files` (só serve paths que pertencem a um commit `sent` próprio) e ao receiver enumerar o que precisa baixar.
+
 ### Commit (`internal/commit`)
 - Modela a ação humana de "está pronto, pode mandar".
 - `Stage` → `Unstage` → `Commit`.
-- Um `Commit` é um snapshot: id + autor + mensagem + lista de paths.
+- Um `Commit` é um snapshot: id + autor + mensagem + lista de `FileSpec{Path, Hash, Size}`.
 - Importante: o pacote `commit` **não fala com a rede**. Ele só atualiza o manifest e devolve a struct `Commit` — o transport é quem decide o que fazer com ela.
+- Arquivos staged ainda sem hash (hasher não passou) são silenciosamente pulados no commit — voltam no próximo.
 
 ### Transport (`internal/transport` + `internal/transport/lan`)
-- Interface mínima: `Send` / `Receive` / `ListPeers` / `Close`.
+- Interface mínima: `Send` / `Pull` / `ListPeers` / `Routes` / `Close`.
+- Modelo **pull explícito**: `Send` anuncia metadata aos peers; bytes só viajam quando o receiver chama `Pull`.
 - A primeira implementação concreta é `lan` — usa `discovery` (mDNS) para achar peers e HTTP para anunciar/transferir.
+- Endpoints peer-facing (montados sob `/peer/` pelo caller):
+  - `POST /peer/commits` — recebe anúncio, persiste com `direction=received`, `status=announced`.
+  - `GET  /peer/files/{commit_id}/{path}` — streama bytes; só serve arquivos pertencentes a um commit `direction=sent` do nó (não vaza outros arquivos do disco).
+- `Send` é fan-out em goroutines; falhas individuais por peer só logam — o commit local não fracassa por peer offline.
+- `Pull` baixa cada file num arquivo `.part`, streama por `xxhash.New()`, verifica contra o hash anunciado. Match → `rename` pro destino + `manifest.Upsert(status=received)`. Mismatch → deleta o temp, marca o commit como `failed`.
+- File placement no receiver: `MXF/1-<sender>/<basename(file)>` — drop do prefixo numerado do sender (Avid lista `.mxf` flat dentro da pasta numerada).
+- Auth entre peers: LAN-trust nesta versão. Header `X-MC-Sinc-User` viaja como rastro mas não é validado contra mDNS (TODO).
 - A interface foi desenhada para suportar implementações futuras (relay WAN, S3-backed async, etc.) sem mudar o resto do sistema.
 
 ### Discovery (`internal/discovery`)
@@ -70,11 +82,16 @@
 
 ### API HTTP (`internal/api`)
 - Servidor `go-chi/chi` v5 ouvindo em `:7777` por default.
-- Endpoints (v0.1):
-  - `GET /status` — info do nó + peers conhecidos
-  - `GET /pending` — arquivos em status `discovered`
-  - `POST /commit` — executa um commit dos arquivos `staged`
-  - `GET /` (e estáticos) — serve a UI web embedada via `embed.FS`.
+- Endpoints UI-facing:
+  - `GET  /status` — info do nó + peers conhecidos
+  - `GET  /pending` — arquivos em status `discovered`
+  - `POST /stage` — marca arquivo pro próximo commit
+  - `POST /commit` — executa commit + dispara `transport.Send` em background
+  - `GET  /commits/sent` — histórico de commits anunciados
+  - `GET  /commits/received` — commits anunciados por peers, aguardando pull
+  - `POST /commits/{id}/pull` — dispara pull em background, devolve 202
+  - `GET  /` (e estáticos) — UI web embedada
+- Endpoints peer-facing são montados sob `/peer/*` via `transport.Routes()`.
 
 ### UI web (`web/`)
 - HTML + CSS + JS puro. Sem framework, sem bundler, sem build step.
@@ -108,11 +125,12 @@ Cada peer publica sua mídia numa subpasta `MXF/1-<user>`. Isso:
 
 - [x] Cálculo de hash em background.
 - [ ] Re-hash quando mtime do arquivo muda.
-- [ ] Transferência HTTP real entre peers.
-- [ ] Pull com confirmação na UI.
-- [ ] Renomeação automática quando um arquivo veio de um peer.
-- [ ] Histórico persistido de commits enviados/recebidos.
+- [x] Transferência HTTP real entre peers.
+- [ ] Pull com confirmação na UI (backend pronto via `POST /commits/{id}/pull`; UI fica pra PR #3).
+- [x] Renomeação automática quando um arquivo veio de um peer (`MXF/1-<sender>/`).
+- [x] Histórico persistido de commits enviados/recebidos.
 - [ ] Conflito: dois peers commitam um path com o mesmo nome ao mesmo tempo.
+- [ ] Auth entre peers (token/HMAC); por ora trust LAN.
 - [ ] Verificação de saúde da database do Avid (`msmMMOB.mdb`) antes de mexer em qualquer coisa.
 
 Veja issues abertas no GitHub para o estado atual de cada item.

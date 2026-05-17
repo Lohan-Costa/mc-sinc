@@ -1,17 +1,24 @@
 // Package api expõe o servidor HTTP local que a UI web consome.
 //
-// Endpoints:
+// Endpoints UI-facing:
 //
-//	GET  /status   → estado geral do nó (user, root, peers, contadores)
-//	GET  /pending  → arquivos detectados aguardando decisão do usuário
-//	POST /stage    → marca um arquivo para entrar no próximo commit
-//	POST /commit   → executa um commit dos arquivos staged
-//	GET  /         → serve a UI web (web/index.html)
+//	GET  /status              → estado geral do nó (user, root, peers, contadores)
+//	GET  /pending             → arquivos detectados aguardando decisão do usuário
+//	POST /stage               → marca um arquivo para entrar no próximo commit
+//	POST /commit              → executa um commit dos arquivos staged
+//	GET  /commits/sent        → histórico de commits anunciados aos peers
+//	GET  /commits/received    → commits anunciados por peers (aguardando pull)
+//	POST /commits/{id}/pull   → baixa arquivos do commit recebido para MXF/1-<sender>/
+//	GET  /                    → serve a UI web (assets embutidos via internal/web)
+//
+// Endpoints peer-facing são montados em /peer/* via Transport.Routes().
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io/fs"
+	"log"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -20,6 +27,7 @@ import (
 	"github.com/Lohan-Costa/mc-sinc/internal/commit"
 	"github.com/Lohan-Costa/mc-sinc/internal/discovery"
 	"github.com/Lohan-Costa/mc-sinc/internal/manifest"
+	"github.com/Lohan-Costa/mc-sinc/internal/transport"
 )
 
 // Server é o handler HTTP raiz do nó.
@@ -30,6 +38,7 @@ type Server struct {
 	store     *manifest.Store
 	commits   *commit.Service
 	discovery *discovery.Discovery
+	transport transport.Transport
 	web       fs.FS
 }
 
@@ -41,6 +50,7 @@ type Config struct {
 	Store     *manifest.Store
 	Commits   *commit.Service
 	Discovery *discovery.Discovery
+	Transport transport.Transport
 	Web       fs.FS // sistema de arquivos com a UI (`web/`)
 }
 
@@ -53,6 +63,7 @@ func New(cfg Config) *Server {
 		store:     cfg.Store,
 		commits:   cfg.Commits,
 		discovery: cfg.Discovery,
+		transport: cfg.Transport,
 		web:       cfg.Web,
 	}
 }
@@ -67,6 +78,14 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/pending", s.handlePending)
 	r.Post("/stage", s.handleStage)
 	r.Post("/commit", s.handleCommit)
+
+	r.Get("/commits/sent", s.handleListCommits(manifest.DirectionSent))
+	r.Get("/commits/received", s.handleListCommits(manifest.DirectionReceived))
+	r.Post("/commits/{id}/pull", s.handlePull)
+
+	if s.transport != nil {
+		r.Mount("/peer", s.transport.Routes())
+	}
 
 	if s.web != nil {
 		r.Handle("/*", http.FileServer(http.FS(s.web)))
@@ -141,7 +160,65 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Persiste como direction=sent — autoriza /peer/files a servi-lo.
+	files := make([]manifest.CommitFile, 0, len(c.Files))
+	for _, f := range c.Files {
+		files = append(files, manifest.CommitFile{Path: f.Path, Hash: f.Hash, Size: f.Size})
+	}
+	if err := s.store.SaveCommit(manifest.Commit{
+		ID:        c.ID,
+		Author:    c.Author,
+		Message:   c.Message,
+		CreatedAt: c.CreatedAt,
+		Direction: manifest.DirectionSent,
+		Status:    manifest.CommitStatusAnnounced,
+		Files:     files,
+	}); err != nil {
+		http.Error(w, "persist commit: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Fan-out aos peers em background — o commit local não espera a rede.
+	if s.transport != nil {
+		go func() {
+			if err := s.transport.Send(context.Background(), c); err != nil {
+				log.Printf("api: transport.Send %s: %v", c.ID, err)
+			}
+		}()
+	}
+
 	writeJSON(w, http.StatusOK, c)
+}
+
+func (s *Server) handleListCommits(dir manifest.Direction) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		list, err := s.store.ListCommits(dir, "")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, list)
+	}
+}
+
+func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		http.Error(w, "id required", http.StatusBadRequest)
+		return
+	}
+	if s.transport == nil {
+		http.Error(w, "no transport configured", http.StatusServiceUnavailable)
+		return
+	}
+	// Pull pode demorar — roda em background, devolve 202.
+	go func() {
+		if err := s.transport.Pull(context.Background(), id); err != nil {
+			log.Printf("api: transport.Pull %s: %v", id, err)
+		}
+	}()
+	w.WriteHeader(http.StatusAccepted)
 }
 
 func writeJSON(w http.ResponseWriter, status int, body interface{}) {

@@ -7,7 +7,8 @@ package transport
 
 import (
 	"context"
-	"io"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/Lohan-Costa/mc-sinc/internal/commit"
 )
@@ -21,19 +22,26 @@ type Peer struct {
 }
 
 // Transport é o contrato comum entre LAN, WAN, etc.
+//
+// O modelo é pull explícito: Send anuncia metadata aos peers; bytes só
+// viajam quando o receiver chama Pull. Receivers materializam anúncios no
+// manifest local — não há método `Receive` bloqueante.
 type Transport interface {
-	// Send anuncia um commit + envia os bytes dos arquivos para todos os peers.
-	// `open` é uma função que devolve um Reader para o conteúdo de cada path
-	// listado no commit (permite streaming sem carregar tudo na memória).
-	Send(ctx context.Context, c *commit.Commit, open func(path string) (io.ReadCloser, error)) error
+	// Send anuncia um commit (metadata + lista de FileSpec) aos peers conhecidos.
+	// Falhas individuais por peer não fazem o commit local falhar.
+	Send(ctx context.Context, c *commit.Commit) error
 
-	// Receive bloqueia até receber um commit de um peer.
-	// Devolve o commit e uma função `pull` que o caller chama para baixar
-	// efetivamente cada arquivo (assim o usuário pode escolher se quer ou não).
-	Receive(ctx context.Context) (*commit.Commit, func(path string) (io.ReadCloser, error), error)
+	// Pull baixa os arquivos de um commit recebido. Itera commit_files,
+	// faz fetch byte-streamed do sender, verifica xxhash64 e grava no disco
+	// local sob `MXF/1-<author>/<filename>`.
+	Pull(ctx context.Context, commitID string) error
 
 	// ListPeers devolve os peers vistos no momento.
 	ListPeers(ctx context.Context) ([]Peer, error)
+
+	// Routes devolve o subrouter HTTP com os endpoints peer-facing
+	// (POST /commits, GET /files/...). O caller monta sob o prefixo /peer.
+	Routes() chi.Router
 
 	// Close encerra qualquer recurso aberto (sockets, listeners, etc.).
 	Close() error

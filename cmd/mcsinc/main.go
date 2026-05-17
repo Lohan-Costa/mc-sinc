@@ -24,6 +24,7 @@ import (
 	"github.com/Lohan-Costa/mc-sinc/internal/discovery"
 	"github.com/Lohan-Costa/mc-sinc/internal/hasher"
 	"github.com/Lohan-Costa/mc-sinc/internal/manifest"
+	"github.com/Lohan-Costa/mc-sinc/internal/transport/lan"
 	"github.com/Lohan-Costa/mc-sinc/internal/watcher"
 	"github.com/Lohan-Costa/mc-sinc/internal/web"
 )
@@ -69,6 +70,8 @@ func main() {
 
 	h := hasher.New(store, *root)
 
+	tport := lan.New(*user, *port, *root, store, disc)
+
 	webRoot, err := web.FS()
 	if err != nil {
 		log.Fatalf("preparando UI: %v", err)
@@ -81,6 +84,7 @@ func main() {
 		Store:     store,
 		Commits:   commits,
 		Discovery: disc,
+		Transport: tport,
 		Web:       webRoot,
 	})
 
