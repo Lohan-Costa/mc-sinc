@@ -18,7 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"io/fs"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -28,9 +28,12 @@ import (
 	"github.com/Lohan-Costa/mc-sinc/internal/avid"
 	"github.com/Lohan-Costa/mc-sinc/internal/commit"
 	"github.com/Lohan-Costa/mc-sinc/internal/discovery"
+	logpkg "github.com/Lohan-Costa/mc-sinc/internal/logging"
 	"github.com/Lohan-Costa/mc-sinc/internal/manifest"
 	"github.com/Lohan-Costa/mc-sinc/internal/transport"
 )
+
+const logModule = "api"
 
 // Server é o handler HTTP raiz do nó.
 type Server struct {
@@ -76,7 +79,7 @@ func New(cfg Config) *Server {
 // Handler devolve o http.Handler com todas as rotas registradas.
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
-	r.Use(middleware.Logger)
+	r.Use(opIDMiddleware)
 	r.Use(middleware.Recoverer)
 
 	r.Get("/status", s.handleStatus)
@@ -124,7 +127,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// "no msmMMOB.mdb found" é esperado em pasta fake/Avid sem mídia ainda —
 	// não polui o log. snap.State == "unknown" já comunica isso na wire.
 	if err != nil && !strings.Contains(err.Error(), "no msmMMOB.mdb") {
-		log.Printf("api: avid.Detect: %v", err)
+		slog.WarnContext(r.Context(), "avid.Detect falhou",
+			slog.String("module", logModule),
+			slog.String("event_id", "AVID_DETECT_FAIL"),
+			slog.String("error", err.Error()))
 	}
 
 	writeJSON(w, http.StatusOK, statusResponse{
@@ -188,7 +194,11 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			if err := s.commits.Stage(r.Context(), f.Path); err != nil {
-				log.Printf("api: auto-stage %s: %v", f.Path, err)
+				slog.WarnContext(r.Context(), "auto-stage falhou pra arquivo",
+					slog.String("module", logModule),
+					slog.String("event_id", "AUTO_STAGE_FAIL"),
+					slog.String("path", f.Path),
+					slog.String("error", err.Error()))
 			}
 		}
 	}
@@ -218,10 +228,20 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fan-out aos peers em background — o commit local não espera a rede.
+	// Propaga o op_id do request original pro background goroutine.
 	if s.transport != nil {
+		opID, _ := logpkg.OpFromContext(r.Context())
 		go func() {
-			if err := s.transport.Send(context.Background(), c); err != nil {
-				log.Printf("api: transport.Send %s: %v", c.ID, err)
+			bgCtx := context.Background()
+			if opID != "" {
+				bgCtx = logpkg.WithOp(bgCtx, opID)
+			}
+			if err := s.transport.Send(bgCtx, c); err != nil {
+				slog.WarnContext(bgCtx, "transport.Send falhou em background",
+					slog.String("module", logModule),
+					slog.String("event_id", "TRANSPORT_SEND_FAIL"),
+					slog.String("commit_id", c.ID),
+					slog.String("error", err.Error()))
 			}
 		}()
 	}
@@ -251,9 +271,18 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Pull pode demorar — roda em background, devolve 202.
+	opID, _ := logpkg.OpFromContext(r.Context())
 	go func() {
-		if err := s.transport.Pull(context.Background(), id); err != nil {
-			log.Printf("api: transport.Pull %s: %v", id, err)
+		bgCtx := context.Background()
+		if opID != "" {
+			bgCtx = logpkg.WithOp(bgCtx, opID)
+		}
+		if err := s.transport.Pull(bgCtx, id); err != nil {
+			slog.WarnContext(bgCtx, "transport.Pull falhou em background",
+				slog.String("module", logModule),
+				slog.String("event_id", "TRANSPORT_PULL_FAIL"),
+				slog.String("commit_id", id),
+				slog.String("error", err.Error()))
 		}
 	}()
 	w.WriteHeader(http.StatusAccepted)
@@ -263,4 +292,14 @@ func writeJSON(w http.ResponseWriter, status int, body interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// opIDMiddleware gera um op_id pra cada request e injeta no context, pra
+// correlacionar logs do mesmo handler. Substitui o middleware.Logger
+// default (que usa log.Printf não-estruturado).
+func opIDMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, _ := logpkg.NewOp(r.Context())
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }

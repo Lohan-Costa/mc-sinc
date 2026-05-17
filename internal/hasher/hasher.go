@@ -15,7 +15,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -24,6 +24,8 @@ import (
 
 	"github.com/Lohan-Costa/mc-sinc/internal/manifest"
 )
+
+const logModule = "hasher"
 
 // DefaultInterval é a periodicidade do polling.
 const DefaultInterval = 5 * time.Second
@@ -66,7 +68,10 @@ func (w *Worker) Run(ctx context.Context) error {
 func (w *Worker) tick(ctx context.Context) {
 	pending, err := w.store.NeedsHash()
 	if err != nil {
-		log.Printf("hasher: needs hash: %v", err)
+		slog.WarnContext(ctx, "falha lendo arquivos pendentes de hash",
+			slog.String("module", logModule),
+			slog.String("event_id", "HASH_LIST_FAIL"),
+			slog.String("error", err.Error()))
 		return
 	}
 	for _, f := range pending {
@@ -76,14 +81,26 @@ func (w *Worker) tick(ctx context.Context) {
 		full := filepath.Join(w.root, f.Path)
 		sum, mtime, err := hashFile(full)
 		if err != nil {
-			log.Printf("hasher: skip %s: %v", f.Path, err)
+			slog.WarnContext(ctx, "pulando arquivo no hash",
+				slog.String("module", logModule),
+				slog.String("event_id", "HASH_READ_ERROR"),
+				slog.String("path", f.Path),
+				slog.String("error", err.Error()))
 			continue
 		}
 		if err := w.store.SetHash(f.Path, sum, mtime); err != nil {
-			log.Printf("hasher: set hash %s: %v", f.Path, err)
+			slog.WarnContext(ctx, "falha gravando hash no manifest",
+				slog.String("module", logModule),
+				slog.String("event_id", "HASH_PERSIST_FAIL"),
+				slog.String("path", f.Path),
+				slog.String("error", err.Error()))
 			continue
 		}
-		log.Printf("hasher: %s -> %s", f.Path, sum)
+		slog.DebugContext(ctx, "arquivo hasheado",
+			slog.String("module", logModule),
+			slog.String("event_id", "HASH_OK"),
+			slog.String("path", f.Path),
+			slog.String("hash", sum))
 	}
 }
 

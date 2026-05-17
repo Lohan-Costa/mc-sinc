@@ -17,7 +17,7 @@ package discovery
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +26,8 @@ import (
 
 	"github.com/Lohan-Costa/mc-sinc/internal/transport"
 )
+
+const logModule = "discovery"
 
 const (
 	serviceName = "_mcsinc._tcp"
@@ -114,7 +116,10 @@ func (d *Discovery) browseOnce(parent context.Context) {
 	entries := make(chan *zeroconf.ServiceEntry, 16)
 	go func() {
 		if err := zeroconf.Browse(ctx, serviceName, domain, entries); err != nil {
-			log.Printf("discovery: browse: %v", err)
+			slog.WarnContext(ctx, "browse mDNS retornou erro",
+				slog.String("module", logModule),
+				slog.String("event_id", "BROWSE_FAIL"),
+				slog.String("error", err.Error()))
 		}
 	}()
 
@@ -137,8 +142,17 @@ func (d *Discovery) browseOnce(parent context.Context) {
 			continue
 		}
 		d.mu.Lock()
+		_, alreadyKnown := d.peers[p.ID]
 		d.peers[p.ID] = &peerState{peer: p, lastSeen: time.Now()}
 		d.mu.Unlock()
+		if !alreadyKnown {
+			slog.InfoContext(ctx, "peer descoberto na LAN",
+				slog.String("module", logModule),
+				slog.String("event_id", "PEER_DISCOVERED"),
+				slog.String("peer_id", p.ID),
+				slog.String("peer_addr", p.Addr),
+				slog.String("peer_version", p.Version))
+		}
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -26,6 +27,7 @@ import (
 	"github.com/Lohan-Costa/mc-sinc/internal/commit"
 	"github.com/Lohan-Costa/mc-sinc/internal/discovery"
 	"github.com/Lohan-Costa/mc-sinc/internal/hasher"
+	logpkg "github.com/Lohan-Costa/mc-sinc/internal/logging"
 	"github.com/Lohan-Costa/mc-sinc/internal/manifest"
 	"github.com/Lohan-Costa/mc-sinc/internal/transport/lan"
 	"github.com/Lohan-Costa/mc-sinc/internal/watcher"
@@ -42,24 +44,49 @@ func main() {
 		dbP         = flag.String("db", defaultDBPath(), "caminho do SQLite local")
 		avidProcess = flag.String("avid-process-name", avid.DefaultProcessName,
 			"nome do processo do Avid usado pra detecção (ex: 'AvidMediaComposer.exe' no Windows)")
+		logLevel = flag.String("log-level", "info",
+			"verbosidade dos logs: trace, debug, info, warn, error")
+		logDir = flag.String("log-dir", defaultLogDir(),
+			"pasta onde app.log e app.jsonl moram")
 	)
 	flag.Parse()
+
+	// Bootstrap do logger ANTES de qualquer outra coisa — assim erros de
+	// startup (auto-discovery, etc.) já entram no log estruturado.
+	cleanupLog, err := logpkg.Init(logpkg.Config{
+		Dir:        *logDir,
+		Level:      parseLevel(*logLevel),
+		Stderr:     true,
+		AppVersion: version,
+		Root:       *root,
+	})
+	if err != nil {
+		log.Fatalf("logging.Init: %v", err)
+	}
+	defer cleanupLog()
 
 	if *root == "" {
 		chosen, err := autoDiscoverRoot()
 		if err != nil {
-			log.Fatal(err)
+			slog.Error("auto-discovery falhou",
+				slog.String("module", "main"),
+				slog.String("event_id", "STARTUP_NO_ROOT"),
+				slog.String("error", err.Error()))
+			os.Exit(1)
 		}
 		*root = chosen
 	}
 
 	if err := os.MkdirAll(filepath.Dir(*dbP), 0o755); err != nil {
-		log.Fatalf("criando diretório do db: %v", err)
+		slog.Error("não consegui criar diretório do db",
+			slog.String("module", "main"), slog.String("error", err.Error()))
+		os.Exit(1)
 	}
 
 	store, err := manifest.Open(*dbP)
 	if err != nil {
-		log.Fatalf("abrindo manifest: %v", err)
+		slog.Error("falha abrindo manifest", slog.String("module", "main"), slog.String("error", err.Error()))
+		os.Exit(1)
 	}
 	defer store.Close()
 
@@ -74,7 +101,8 @@ func main() {
 
 	w, err := watcher.New(localFolder)
 	if err != nil {
-		log.Fatalf("criando watcher: %v", err)
+		slog.Error("falha criando watcher", slog.String("module", "main"), slog.String("error", err.Error()))
+		os.Exit(1)
 	}
 
 	h := hasher.New(store, *root)
@@ -83,7 +111,8 @@ func main() {
 
 	webRoot, err := web.FS()
 	if err != nil {
-		log.Fatalf("preparando UI: %v", err)
+		slog.Error("falha preparando UI", slog.String("module", "main"), slog.String("error", err.Error()))
+		os.Exit(1)
 	}
 
 	srv := api.New(api.Config{
@@ -108,28 +137,46 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("MC Sinc %s — user=%q root=%q http=:%d", version, *user, *root, *port)
-		log.Printf("UI:    http://localhost:%d", *port)
+		slog.Info("MC Sinc iniciado",
+			slog.String("module", "main"),
+			slog.String("event_id", "HTTP_LISTEN"),
+			slog.String("version", version),
+			slog.String("user", *user),
+			slog.String("root", *root),
+			slog.Int("port", *port))
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("http: %v", err)
+			slog.Error("falha no servidor HTTP",
+				slog.String("module", "main"),
+				slog.String("event_id", "HTTP_FAIL"),
+				slog.String("error", err.Error()))
+			os.Exit(1)
 		}
 	}()
 
 	go func() {
 		if err := disc.Run(ctx); err != nil {
-			log.Printf("discovery: %v", err)
+			slog.Warn("discovery encerrou com erro",
+				slog.String("module", "discovery"),
+				slog.String("event_id", "DISCOVERY_FAIL"),
+				slog.String("error", err.Error()))
 		}
 	}()
 
 	go func() {
 		if err := w.Run(ctx); err != nil {
-			log.Printf("watcher: %v", err)
+			slog.Warn("watcher encerrou com erro",
+				slog.String("module", "watcher"),
+				slog.String("event_id", "WATCHER_FAIL"),
+				slog.String("error", err.Error()))
 		}
 	}()
 
 	go func() {
 		if err := h.Run(ctx); err != nil {
-			log.Printf("hasher: %v", err)
+			slog.Warn("hasher encerrou com erro",
+				slog.String("module", "hasher"),
+				slog.String("event_id", "HASHER_FAIL"),
+				slog.String("error", err.Error()))
 		}
 	}()
 
@@ -147,12 +194,15 @@ func main() {
 				ModifiedAt: info.ModTime(),
 				Status:     manifest.StatusDiscovered,
 			})
-			log.Printf("discovered: %s", rel)
+			slog.Info("arquivo descoberto pelo watcher",
+				slog.String("module", "watcher"),
+				slog.String("event_id", "FILE_DISCOVERED"),
+				slog.String("path", rel))
 		}
 	}()
 
 	<-ctx.Done()
-	log.Println("shutting down…")
+	slog.Info("encerrando", slog.String("module", "main"), slog.String("event_id", "SHUTDOWN"))
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelShutdown()
@@ -174,6 +224,31 @@ func defaultDBPath() string {
 	return filepath.Join(home, ".mcsinc", "manifest.db")
 }
 
+func defaultLogDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".mcsinc-logs"
+	}
+	return filepath.Join(home, ".mcsinc", "logs")
+}
+
+func parseLevel(s string) slog.Level {
+	switch s {
+	case "trace":
+		return logpkg.LevelTrace
+	case "debug":
+		return slog.LevelDebug
+	case "info":
+		return slog.LevelInfo
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
 // autoDiscoverRoot escaneia volumes conectados procurando pela estrutura
 // "Avid MediaFiles/MXF" na raiz de cada um. Devolve o path do candidato
 // com .mdb mais recente. Os outros encontrados ficam só em log informativo.
@@ -188,10 +263,17 @@ func autoDiscoverRoot() (string, error) {
 				"Conecte um disco com a estrutura, ou passe --root manual.")
 	}
 	best := cands[0]
-	log.Printf("auto-discovery: usando %q (volume %q, último .mdb %s)",
-		best.Path, best.VolumeName, lastMDBLabel(best.LastMDBChange))
+	slog.Info("auto-discovery escolheu o volume mais recente",
+		slog.String("module", "main"),
+		slog.String("event_id", "AUTO_DISCOVERY_PICKED"),
+		slog.String("path", best.Path),
+		slog.String("volume", best.VolumeName),
+		slog.String("last_mdb", lastMDBLabel(best.LastMDBChange)))
 	for _, c := range cands[1:] {
-		log.Printf("auto-discovery: também encontrado %q (não usado nesta sessão)", c.Path)
+		slog.Info("auto-discovery encontrou outro volume (não usado nesta sessão)",
+			slog.String("module", "main"),
+			slog.String("event_id", "AUTO_DISCOVERY_EXTRA"),
+			slog.String("path", c.Path))
 	}
 	return best.Path, nil
 }

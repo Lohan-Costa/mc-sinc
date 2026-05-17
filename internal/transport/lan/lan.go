@@ -12,7 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -23,9 +23,12 @@ import (
 	"github.com/cespare/xxhash/v2"
 
 	"github.com/Lohan-Costa/mc-sinc/internal/commit"
+	logpkg "github.com/Lohan-Costa/mc-sinc/internal/logging"
 	"github.com/Lohan-Costa/mc-sinc/internal/manifest"
 	"github.com/Lohan-Costa/mc-sinc/internal/transport"
 )
+
+const logModule = "lan"
 
 // PeerSource é a dependência mínima que o transport precisa pra saber pra
 // quem anunciar. Em produção é satisfeito por *discovery.Discovery; nos
@@ -65,7 +68,10 @@ func New(user string, port int, root string, store *manifest.Store, disc PeerSou
 func (t *Transport) Send(ctx context.Context, c *commit.Commit) error {
 	peers := t.discov.Peers()
 	if len(peers) == 0 {
-		log.Printf("lan: Send %s — nenhum peer descoberto", c.ID)
+		slog.WarnContext(ctx, "Send chamado sem peers descobertos — nada será enviado",
+			slog.String("module", logModule),
+			slog.String("event_id", "SEND_NO_PEERS"),
+			slog.String("commit_id", c.ID))
 		return nil
 	}
 
@@ -77,12 +83,28 @@ func (t *Transport) Send(ctx context.Context, c *commit.Commit) error {
 		wg.Add(1)
 		go func(peer transport.Peer) {
 			defer wg.Done()
-			log.Printf("lan: announce %s -> %s (peer.Addr=%q)", c.ID, peer.ID, peer.Addr)
-			if err := t.announce(ctx, peer, c); err != nil {
-				log.Printf("lan: announce %s -> %s FAILED: %v", c.ID, peer.ID, err)
+			// Cria um op_id por peer pra permitir correlação cross-host.
+			peerCtx, opID := logpkg.NewOp(ctx)
+			slog.InfoContext(peerCtx, "iniciando announce para peer",
+				slog.String("module", logModule),
+				slog.String("event_id", "ANNOUNCE_START"),
+				slog.String("commit_id", c.ID),
+				slog.String("peer_id", peer.ID),
+				slog.String("peer_addr", peer.Addr))
+			if err := t.announce(peerCtx, peer, c, opID); err != nil {
+				slog.ErrorContext(peerCtx, "announce falhou",
+					slog.String("module", logModule),
+					slog.String("event_id", "ANNOUNCE_FAIL"),
+					slog.String("commit_id", c.ID),
+					slog.String("peer_id", peer.ID),
+					slog.String("error", err.Error()))
 				return
 			}
-			log.Printf("lan: announced %s -> %s OK", c.ID, peer.ID)
+			slog.InfoContext(peerCtx, "announce concluído",
+				slog.String("module", logModule),
+				slog.String("event_id", "ANNOUNCE_OK"),
+				slog.String("commit_id", c.ID),
+				slog.String("peer_id", peer.ID))
 		}(p)
 	}
 	wg.Wait()
@@ -123,7 +145,12 @@ func (t *Transport) Pull(ctx context.Context, commitID string) error {
 	anyFailed := false
 	for _, f := range c.Files {
 		if err := t.pullOne(ctx, senderHostPort, commitID, f, destDir); err != nil {
-			log.Printf("lan: pull %s/%s: %v", commitID, f.Path, err)
+			slog.ErrorContext(ctx, "pull de arquivo falhou",
+				slog.String("module", logModule),
+				slog.String("event_id", "PULL_FILE_FAIL"),
+				slog.String("commit_id", commitID),
+				slog.String("path", f.Path),
+				slog.String("error", err.Error()))
 			anyFailed = true
 			continue
 		}
@@ -195,7 +222,12 @@ func (t *Transport) pullOne(ctx context.Context, peerAddr, commitID string, f ma
 	}); err != nil {
 		return fmt.Errorf("upsert manifest: %w", err)
 	}
-	log.Printf("lan: pulled %s (%d bytes, hash %s)", rel, written, gotHash)
+	slog.InfoContext(ctx, "arquivo baixado com sucesso",
+		slog.String("module", logModule),
+		slog.String("event_id", "PULL_FILE_OK"),
+		slog.String("path", rel),
+		slog.Int64("bytes", written),
+		slog.String("hash", gotHash))
 	return nil
 }
 

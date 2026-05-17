@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"time"
@@ -18,10 +18,13 @@ import (
 const (
 	announceTimeout = 10 * time.Second
 	userHeader      = "X-MC-Sinc-User"
+	opHeader        = "X-MC-Sinc-Op"
 )
 
 // announce envia um anúncio de commit para um peer específico.
-func (t *Transport) announce(ctx context.Context, peer transport.Peer, c *commit.Commit) error {
+// opID viaja no header X-MC-Sinc-Op pra permitir correlação cross-host
+// nos logs estruturados.
+func (t *Transport) announce(ctx context.Context, peer transport.Peer, c *commit.Commit, opID string) error {
 	body, err := json.Marshal(c)
 	if err != nil {
 		return fmt.Errorf("marshal commit: %w", err)
@@ -30,7 +33,13 @@ func (t *Transport) announce(ctx context.Context, peer transport.Peer, c *commit
 		return fmt.Errorf("peer %s sem Addr — discovery não populou", peer.ID)
 	}
 	endpoint := fmt.Sprintf("http://%s/peer/commits", peer.Addr)
-	log.Printf("lan: POST %s (commit=%s, files=%d, body=%dB)", endpoint, c.ID, len(c.Files), len(body))
+	slog.InfoContext(ctx, "POST anúncio para peer",
+		slog.String("module", logModule),
+		slog.String("event_id", "ANNOUNCE_HTTP_POST"),
+		slog.String("endpoint", endpoint),
+		slog.String("commit_id", c.ID),
+		slog.Int("files", len(c.Files)),
+		slog.Int("body_bytes", len(body)))
 
 	annCtx, cancel := context.WithTimeout(ctx, announceTimeout)
 	defer cancel()
@@ -41,6 +50,9 @@ func (t *Transport) announce(ctx context.Context, peer transport.Peer, c *commit
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(userHeader, t.user)
+	if opID != "" {
+		req.Header.Set(opHeader, opID)
+	}
 
 	resp, err := t.httpClient.Do(req)
 	if err != nil {

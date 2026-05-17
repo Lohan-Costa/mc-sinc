@@ -3,7 +3,7 @@ package lan
 import (
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Lohan-Costa/mc-sinc/internal/commit"
+	logpkg "github.com/Lohan-Costa/mc-sinc/internal/logging"
 	"github.com/Lohan-Costa/mc-sinc/internal/manifest"
 )
 
@@ -27,17 +28,34 @@ func (t *Transport) Routes() chi.Router {
 // handleAnnounce recebe um anúncio de commit de outro peer e persiste como
 // direction=received, status=announced. O receiver decide depois se faz pull.
 func (t *Transport) handleAnnounce(w http.ResponseWriter, r *http.Request) {
-	log.Printf("lan: received POST /peer/commits from %s (X-MC-Sinc-User=%q)",
-		r.RemoteAddr, r.Header.Get(userHeader))
+	// Pega o op_id do header pra correlacionar com o sender no log.
+	ctx := r.Context()
+	if op := r.Header.Get(opHeader); op != "" {
+		ctx = logpkg.WithOp(ctx, op)
+	}
+
+	slog.InfoContext(ctx, "POST /peer/commits recebido",
+		slog.String("module", logModule),
+		slog.String("event_id", "ANNOUNCE_RECEIVED"),
+		slog.String("from", r.RemoteAddr),
+		slog.String("sender_user", r.Header.Get(userHeader)))
+
 	var c commit.Commit
 	if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
-		log.Printf("lan: announce decode failed: %v", err)
+		slog.WarnContext(ctx, "decode do announce falhou",
+			slog.String("module", logModule),
+			slog.String("event_id", "ANNOUNCE_DECODE_FAIL"),
+			slog.String("error", err.Error()))
 		http.Error(w, "bad announce body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	if c.ID == "" || c.Author == "" || len(c.Files) == 0 {
-		log.Printf("lan: REJEITADO announce vazio (id=%q author=%q files=%d) "+
-			"- provavel UI do sender sem stage", c.ID, c.Author, len(c.Files))
+		slog.WarnContext(ctx, "announce rejeitado por validação vazia",
+			slog.String("module", logModule),
+			slog.String("event_id", "ANNOUNCE_REJECTED_EMPTY"),
+			slog.String("commit_id", c.ID),
+			slog.String("author", c.Author),
+			slog.Int("files", len(c.Files)))
 		http.Error(w, "announce missing id, author or files", http.StatusBadRequest)
 		return
 	}
@@ -50,6 +68,9 @@ func (t *Transport) handleAnnounce(w http.ResponseWriter, r *http.Request) {
 	files := make([]manifest.CommitFile, 0, len(c.Files))
 	for _, f := range c.Files {
 		if f.Hash == "" || f.Path == "" {
+			slog.WarnContext(ctx, "announce rejeitado por arquivo sem hash/path",
+				slog.String("module", logModule),
+				slog.String("event_id", "ANNOUNCE_FILE_INVALID"))
 			http.Error(w, "file missing hash/path", http.StatusBadRequest)
 			return
 		}
@@ -67,10 +88,20 @@ func (t *Transport) handleAnnounce(w http.ResponseWriter, r *http.Request) {
 		Files:     files,
 	}
 	if err := t.store.SaveCommit(mc); err != nil {
+		slog.ErrorContext(ctx, "falha persistindo announce",
+			slog.String("module", logModule),
+			slog.String("event_id", "ANNOUNCE_PERSIST_FAIL"),
+			slog.String("commit_id", c.ID),
+			slog.String("error", err.Error()))
 		http.Error(w, "persist: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	log.Printf("lan: received announce %s from %s (%d files)", c.ID, c.Author, len(c.Files))
+	slog.InfoContext(ctx, "announce persistido como recebido",
+		slog.String("module", logModule),
+		slog.String("event_id", "ANNOUNCE_OK"),
+		slog.String("commit_id", c.ID),
+		slog.String("author", c.Author),
+		slog.Int("files", len(c.Files)))
 	w.WriteHeader(http.StatusAccepted)
 }
 
