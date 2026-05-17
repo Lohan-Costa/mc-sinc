@@ -10,9 +10,7 @@ package main
 
 import (
 	"context"
-	"embed"
 	"flag"
-	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -26,12 +24,10 @@ import (
 	"github.com/Lohan-Costa/mc-sinc/internal/discovery"
 	"github.com/Lohan-Costa/mc-sinc/internal/manifest"
 	"github.com/Lohan-Costa/mc-sinc/internal/watcher"
+	"github.com/Lohan-Costa/mc-sinc/internal/web"
 )
 
 const version = "0.1.0-alpha"
-
-//go:embed all:web
-var webFS embed.FS
 
 func main() {
 	var (
@@ -70,7 +66,7 @@ func main() {
 		log.Fatalf("criando watcher: %v", err)
 	}
 
-	webRoot, err := fs.Sub(webFS, "web")
+	webRoot, err := web.FS()
 	if err != nil {
 		log.Fatalf("preparando UI: %v", err)
 	}
