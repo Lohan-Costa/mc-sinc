@@ -74,6 +74,14 @@
 - Auth entre peers: LAN-trust nesta versão. Header `X-MC-Sinc-User` viaja como rastro mas não é validado contra mDNS (TODO).
 - A interface foi desenhada para suportar implementações futuras (relay WAN, S3-backed async, etc.) sem mudar o resto do sistema.
 
+### Avid state (`internal/avid`)
+- Detecta o estado do Avid Media Composer no host atual combinando:
+  - **Processo Avid rodando?** Via `pgrep -f` (Unix) ou `tasklist` (Windows). Nome configurável por `--avid-process-name`.
+  - **Mtime mais recente de `MXF/*/msmMMOB.mdb`** — o Avid atualiza esse arquivo logo após escrita de mídia.
+- Resultado é um `Snapshot` com `State`: `busy` (gravando agora) / `open_idle` (aberto sem escrita) / `recently_closed` (fechou faz <5 min) / `idle` (fechado há tempo bom) / `unknown` (sem `.mdb` e sem processo).
+- Janelas (configuráveis): `BusyWindow = 10s`, `RecentWindow = 5min`.
+- **Não bloqueia nada nesta versão** — surfaceado em `/status` e na UI como informativo. Quando MC Sinc ganhar modo auto-pull/auto-commit, essa primitiva é o gate.
+
 ### Discovery (`internal/discovery`)
 - mDNS via `hashicorp/mdns`.
 - Service name: `_mcsinc._tcp.local.`
@@ -131,6 +139,6 @@ Cada peer publica sua mídia numa subpasta `MXF/1-<user>`. Isso:
 - [x] Histórico persistido de commits enviados/recebidos.
 - [ ] Conflito: dois peers commitam um path com o mesmo nome ao mesmo tempo.
 - [ ] Auth entre peers (token/HMAC); por ora trust LAN.
-- [ ] Verificação de saúde da database do Avid (`msmMMOB.mdb`) antes de mexer em qualquer coisa.
+- [x] Verificação de saúde da database do Avid (`msmMMOB.mdb`) — primitiva `internal/avid` exposta em `/status` (informativo; auto-mode usará no futuro).
 
 Veja issues abertas no GitHub para o estado atual de cada item.
