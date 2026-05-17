@@ -14,6 +14,7 @@
       --accent: #4ea1ff;
       --ok: #4ade80;
       --warn: #fbbf24;
+      --danger: #f87171;
     }
     * { box-sizing: border-box; }
     body {
@@ -58,12 +59,68 @@
       background: var(--accent); color: #fff; border: 0; padding: .5rem 1rem;
       border-radius: 6px; cursor: pointer; font-size: .9rem;
     }
-    button:hover { filter: brightness(1.1); }
+    button:hover:not(:disabled) { filter: brightness(1.1); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
     input[type=text] {
       background: var(--bg); color: var(--text); border: 1px solid var(--border);
       padding: .5rem .75rem; border-radius: 6px; flex: 1; font-size: .9rem;
     }
     .commit-form { display: flex; gap: .5rem; margin-top: 1rem; }
+
+    /* Cards de commit (sent + received) */
+    .commit-list { display: grid; gap: .75rem; }
+    .commit-card {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: .9rem 1rem;
+      background: var(--bg);
+    }
+    .commit-card header.row {
+      display: flex; align-items: baseline; justify-content: space-between;
+      gap: 1rem; padding: 0; border: 0; margin-bottom: .35rem;
+    }
+    .commit-card .meta {
+      color: var(--muted); font-size: .8rem;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    }
+    .commit-card .msg { font-size: .95rem; margin: .15rem 0 .5rem; }
+    .commit-card .summary {
+      display: flex; justify-content: space-between; align-items: center;
+      gap: 1rem; font-size: .85rem; color: var(--muted);
+    }
+    .commit-card .summary .actions { display: flex; gap: .5rem; align-items: center; }
+    .commit-card .toggle {
+      background: transparent; color: var(--accent); padding: 0;
+      font-size: .85rem; text-decoration: underline; cursor: pointer;
+    }
+    .commit-card .toggle:hover { filter: brightness(1.2); }
+    .commit-card details { margin-top: .5rem; }
+    .commit-card details summary {
+      color: var(--accent); cursor: pointer; font-size: .85rem;
+      list-style: none; user-select: none;
+    }
+    .commit-card details summary::-webkit-details-marker { display: none; }
+    .commit-card details summary::before { content: '▸ '; }
+    .commit-card details[open] summary::before { content: '▾ '; }
+    .commit-card details ul.files { margin-top: .4rem; }
+
+    /* Badges de status */
+    .badge {
+      display: inline-block; padding: .15rem .55rem;
+      border-radius: 999px; font-size: .72rem; font-weight: 600;
+      text-transform: uppercase; letter-spacing: .04em;
+    }
+    .badge.announced { background: #2a2e38; color: var(--muted); }
+    .badge.pulling   { background: rgba(251,191,36,.15); color: var(--warn); }
+    .badge.pulled    { background: rgba(74,222,128,.15); color: var(--ok); }
+    .badge.failed    { background: rgba(248,113,113,.15); color: var(--danger); }
+
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
+    .badge.pulling { animation: pulse 1.6s ease-in-out infinite; }
+
+    /* Commits enviados ficam mais compactos */
+    .commit-card.sent { padding: .65rem 1rem; }
+    .commit-card.sent .msg { margin: 0; font-size: .9rem; }
   </style>
 </head>
 <body>
@@ -90,14 +147,128 @@
         <button id="commit-btn">Commit</button>
       </div>
     </section>
+
+    <section class="panel">
+      <h2>Commits recebidos</h2>
+      <div class="commit-list" id="received"><div class="empty">carregando…</div></div>
+    </section>
+
+    <section class="panel">
+      <h2>Commits enviados</h2>
+      <div class="commit-list" id="sent"><div class="empty">carregando…</div></div>
+    </section>
   </main>
 
   <script>
+    // pullsInFlight rastreia ids cuja UI já mandou POST /pull mas o backend
+    // ainda não atualizou o status no SQLite — evita botão Baixar voltar
+    // por um tick antes do status virar "pulling".
+    const pullsInFlight = new Set();
+
+    // openDetails rastreia ids cujos <details> de "arquivos" estão expandidos.
+    // Necessário porque refresh() reescreve innerHTML a cada 4s, e isso
+    // destruiria o estado open=true. Reaplicado dentro de renderReceivedCard
+    // e renderSentCard.
+    const openDetails = new Set();
+
+    function fmtSize(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+      return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+    }
+
+    function fmtTime(iso) {
+      try {
+        const d = new Date(iso);
+        return d.toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
+      } catch { return iso; }
+    }
+
+    function totalSize(files) {
+      if (!files) return 0;
+      return files.reduce((acc, f) => acc + (f.size || 0), 0);
+    }
+
+    function escapeHTML(s) {
+      return (s || '').replace(/[&<>"']/g, ch => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+      }[ch]));
+    }
+
+    function statusLabel(s) {
+      switch (s) {
+        case 'announced': return 'aguardando';
+        case 'pulling':   return 'baixando';
+        case 'pulled':    return 'baixado';
+        case 'failed':    return 'falhou';
+        default:          return s || '?';
+      }
+    }
+
+    function renderFilesList(files) {
+      if (!files || files.length === 0) return '<li class="empty">nenhum arquivo</li>';
+      return files.map(f => `
+        <li>
+          <span>${escapeHTML(f.path)}</span>
+          <span>${fmtSize(f.size)} · ${escapeHTML(f.hash)}</span>
+        </li>
+      `).join('');
+    }
+
+    function renderReceivedCard(c) {
+      const uiStatus = pullsInFlight.has(c.id) && c.status === 'announced' ? 'pulling' : c.status;
+      const canPull = uiStatus === 'announced' || uiStatus === 'failed';
+      const btnLabel = uiStatus === 'failed' ? 'Tentar novamente' : 'Baixar';
+      const fileCount = (c.files || []).length;
+
+      return `
+        <article class="commit-card" data-id="${escapeHTML(c.id)}">
+          <header class="row">
+            <div>
+              <strong>@${escapeHTML(c.author)}</strong>
+              <span class="meta"> · ${escapeHTML(c.id)}</span>
+            </div>
+            <span class="badge ${escapeHTML(uiStatus)}">${escapeHTML(statusLabel(uiStatus))}</span>
+          </header>
+          <div class="msg">${escapeHTML(c.message) || '<em class="empty">sem mensagem</em>'}</div>
+          <div class="summary">
+            <span>${fileCount} arquivo${fileCount === 1 ? '' : 's'} · ${fmtSize(totalSize(c.files))} · ${fmtTime(c.created_at)}</span>
+            <span class="actions">
+              <button class="pull-btn" data-id="${escapeHTML(c.id)}" ${canPull ? '' : 'disabled'}>${btnLabel}</button>
+            </span>
+          </div>
+          <details${openDetails.has(c.id) ? ' open' : ''}>
+            <summary>arquivos</summary>
+            <ul class="files">${renderFilesList(c.files)}</ul>
+          </details>
+        </article>
+      `;
+    }
+
+    function renderSentCard(c) {
+      const fileCount = (c.files || []).length;
+      return `
+        <article class="commit-card sent" data-id="${escapeHTML(c.id)}">
+          <header class="row">
+            <div class="msg">${escapeHTML(c.message) || '<em class="empty">sem mensagem</em>'}</div>
+            <span class="meta">${fmtTime(c.created_at)}</span>
+          </header>
+          <details${openDetails.has(c.id) ? ' open' : ''}>
+            <summary>${fileCount} arquivo${fileCount === 1 ? '' : 's'} · ${fmtSize(totalSize(c.files))}</summary>
+            <ul class="files">${renderFilesList(c.files)}</ul>
+          </details>
+        </article>
+      `;
+    }
+
     async function refresh() {
       try {
-        const [status, pending] = await Promise.all([
+        const [status, pending, received, sent] = await Promise.all([
           fetch('/status').then(r => r.json()),
           fetch('/pending').then(r => r.json()),
+          fetch('/commits/received').then(r => r.json()),
+          fetch('/commits/sent').then(r => r.json()),
         ]);
 
         document.getElementById('version').textContent = 'v' + status.version;
@@ -107,13 +278,34 @@
         document.getElementById('peers').textContent =
           (status.peers && status.peers.length) ? status.peers.join(', ') : 'nenhum ainda';
 
-        const list = document.getElementById('pending');
+        const pendingList = document.getElementById('pending');
         if (!pending || pending.length === 0) {
-          list.innerHTML = '<li class="empty">sem arquivos pendentes — siga editando.</li>';
+          pendingList.innerHTML = '<li class="empty">sem arquivos pendentes — siga editando.</li>';
         } else {
-          list.innerHTML = pending.map(f =>
-            `<li><span>${f.Path}</span><span>${(f.Size/1e6).toFixed(1)} MB</span></li>`
+          pendingList.innerHTML = pending.map(f =>
+            `<li><span>${escapeHTML(f.Path)}</span><span>${fmtSize(f.Size)}</span></li>`
           ).join('');
+        }
+
+        // Limpa o pullsInFlight pra ids cujo status já saiu de 'announced'.
+        if (received) {
+          received.forEach(c => {
+            if (c.status !== 'announced') pullsInFlight.delete(c.id);
+          });
+        }
+
+        const receivedList = document.getElementById('received');
+        if (!received || received.length === 0) {
+          receivedList.innerHTML = '<div class="empty">nada chegou de peers ainda.</div>';
+        } else {
+          receivedList.innerHTML = received.map(renderReceivedCard).join('');
+        }
+
+        const sentList = document.getElementById('sent');
+        if (!sent || sent.length === 0) {
+          sentList.innerHTML = '<div class="empty">você ainda não fez commits.</div>';
+        } else {
+          sentList.innerHTML = sent.map(renderSentCard).join('');
         }
       } catch (e) {
         console.error(e);
@@ -130,6 +322,44 @@
       });
       if (!r.ok) { alert('Falha no commit: ' + await r.text()); return; }
       document.getElementById('message').value = '';
+      refresh();
+    });
+
+    // Mantém o Set openDetails em sincronia com o que o usuário abre/fecha.
+    // 'toggle' não bubba — escuto em fase de captura nos containers.
+    function trackToggles(container) {
+      container.addEventListener('toggle', (ev) => {
+        if (ev.target.tagName !== 'DETAILS') return;
+        const card = ev.target.closest('.commit-card');
+        if (!card || !card.dataset.id) return;
+        if (ev.target.open) openDetails.add(card.dataset.id);
+        else openDetails.delete(card.dataset.id);
+      }, true);
+    }
+    trackToggles(document.getElementById('received'));
+    trackToggles(document.getElementById('sent'));
+
+    // Delegação de evento — cards são re-renderizados a cada 4s,
+    // então não dá pra anexar listener por card direto.
+    document.getElementById('received').addEventListener('click', async (ev) => {
+      const btn = ev.target.closest('.pull-btn');
+      if (!btn || btn.disabled) return;
+      const id = btn.dataset.id;
+      if (!id) return;
+
+      btn.disabled = true;
+      btn.textContent = 'Baixando…';
+      pullsInFlight.add(id);
+      try {
+        const r = await fetch(`/commits/${encodeURIComponent(id)}/pull`, { method: 'POST' });
+        if (!r.ok && r.status !== 202) {
+          alert('Falha ao iniciar pull: ' + await r.text());
+          pullsInFlight.delete(id);
+        }
+      } catch (e) {
+        alert('Erro: ' + e.message);
+        pullsInFlight.delete(id);
+      }
       refresh();
     });
 
