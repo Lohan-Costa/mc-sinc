@@ -24,6 +24,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/Lohan-Costa/mc-sinc/internal/avid"
 	"github.com/Lohan-Costa/mc-sinc/internal/commit"
 	"github.com/Lohan-Costa/mc-sinc/internal/discovery"
 	"github.com/Lohan-Costa/mc-sinc/internal/manifest"
@@ -32,39 +33,42 @@ import (
 
 // Server é o handler HTTP raiz do nó.
 type Server struct {
-	user      string
-	root      string
-	version   string
-	store     *manifest.Store
-	commits   *commit.Service
-	discovery *discovery.Discovery
-	transport transport.Transport
-	web       fs.FS
+	user        string
+	root        string
+	version     string
+	store       *manifest.Store
+	commits     *commit.Service
+	discovery   *discovery.Discovery
+	transport   transport.Transport
+	web         fs.FS
+	avidProcess string
 }
 
 // Config agrupa as dependências necessárias para construir o Server.
 type Config struct {
-	User      string
-	Root      string
-	Version   string
-	Store     *manifest.Store
-	Commits   *commit.Service
-	Discovery *discovery.Discovery
-	Transport transport.Transport
-	Web       fs.FS // sistema de arquivos com a UI (`web/`)
+	User        string
+	Root        string
+	Version     string
+	Store       *manifest.Store
+	Commits     *commit.Service
+	Discovery   *discovery.Discovery
+	Transport   transport.Transport
+	Web         fs.FS // sistema de arquivos com a UI (`web/`)
+	AvidProcess string // nome do processo do Avid pra detecção (ex: "Avid Media Composer")
 }
 
 // New monta o servidor.
 func New(cfg Config) *Server {
 	return &Server{
-		user:      cfg.User,
-		root:      cfg.Root,
-		version:   cfg.Version,
-		store:     cfg.Store,
-		commits:   cfg.Commits,
-		discovery: cfg.Discovery,
-		transport: cfg.Transport,
-		web:       cfg.Web,
+		user:        cfg.User,
+		root:        cfg.Root,
+		version:     cfg.Version,
+		store:       cfg.Store,
+		commits:     cfg.Commits,
+		discovery:   cfg.Discovery,
+		transport:   cfg.Transport,
+		web:         cfg.Web,
+		avidProcess: cfg.AvidProcess,
 	}
 }
 
@@ -94,10 +98,11 @@ func (s *Server) Handler() http.Handler {
 }
 
 type statusResponse struct {
-	User    string   `json:"user"`
-	Root    string   `json:"root"`
-	Version string   `json:"version"`
-	Peers   []string `json:"peers"`
+	User    string        `json:"user"`
+	Root    string        `json:"root"`
+	Version string        `json:"version"`
+	Peers   []string      `json:"peers"`
+	Avid    avid.Snapshot `json:"avid"`
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -107,11 +112,24 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			peerIDs = append(peerIDs, p.ID)
 		}
 	}
+
+	// Detecta o estado do Avid. Erros são esperados em ambientes sem mídia
+	// (ex: --root apontado pra pasta vazia) — o Snapshot ainda é parcial e
+	// útil; logamos pra debug mas não falhamos a request.
+	snap, err := avid.Detect(avid.Config{
+		Root:        s.root,
+		ProcessName: s.avidProcess,
+	})
+	if err != nil {
+		log.Printf("api: avid.Detect: %v", err)
+	}
+
 	writeJSON(w, http.StatusOK, statusResponse{
 		User:    s.user,
 		Root:    s.root,
 		Version: s.version,
 		Peers:   peerIDs,
+		Avid:    snap,
 	})
 }
 

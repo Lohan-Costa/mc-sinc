@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Lohan-Costa/mc-sinc/internal/api"
+	"github.com/Lohan-Costa/mc-sinc/internal/avid"
 	"github.com/Lohan-Costa/mc-sinc/internal/commit"
 	"github.com/Lohan-Costa/mc-sinc/internal/discovery"
 	"github.com/Lohan-Costa/mc-sinc/internal/hasher"
@@ -33,10 +34,12 @@ const version = "0.1.0-alpha"
 
 func main() {
 	var (
-		root = flag.String("root", "", "caminho da pasta MXF do Avid (obrigatório)")
-		user = flag.String("user", defaultUser(), "identificador deste editor na rede")
-		port = flag.Int("port", 7777, "porta do servidor HTTP local")
-		dbP  = flag.String("db", defaultDBPath(), "caminho do SQLite local")
+		root        = flag.String("root", "", "caminho da pasta MXF do Avid (obrigatório)")
+		user        = flag.String("user", defaultUser(), "identificador deste editor na rede")
+		port        = flag.Int("port", 7777, "porta do servidor HTTP local")
+		dbP         = flag.String("db", defaultDBPath(), "caminho do SQLite local")
+		avidProcess = flag.String("avid-process-name", avid.DefaultProcessName,
+			"nome do processo do Avid usado pra detecção (ex: 'AvidMediaComposer.exe' no Windows)")
 	)
 	flag.Parse()
 
@@ -78,14 +81,15 @@ func main() {
 	}
 
 	srv := api.New(api.Config{
-		User:      *user,
-		Root:      *root,
-		Version:   version,
-		Store:     store,
-		Commits:   commits,
-		Discovery: disc,
-		Transport: tport,
-		Web:       webRoot,
+		User:        *user,
+		Root:        *root,
+		Version:     version,
+		Store:       store,
+		Commits:     commits,
+		Discovery:   disc,
+		Transport:   tport,
+		Web:         webRoot,
+		AvidProcess: *avidProcess,
 	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
