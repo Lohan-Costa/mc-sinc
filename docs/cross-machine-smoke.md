@@ -1,249 +1,103 @@
 # Teste cross-máquina — Mac ↔ Windows
 
-Este runbook explica como exercitar o **caminho P2P real** do MC Sinc entre duas máquinas (uma macOS, outra Windows) na mesma LAN. Os testes unitários e o `smoke-ui.sh` validam o protocolo localmente, mas mDNS não funciona bem sobre loopback do macOS — então a única forma de confirmar discovery + transfer reais é com dois hosts distintos.
+## TL;DR
 
-A meta final: subir `mcsinc` em cada máquina, ver as duas se descobrirem via mDNS, fazer um commit num lado e baixar pelo outro.
+Rode um script em cada máquina, no terminal:
+
+```bash
+# Mac
+./scripts/cross-test.sh
+```
+
+```powershell
+# Windows
+.\scripts\cross-test.ps1
+```
+
+Cada script faz tudo sozinho:
+
+- Confere se o Go está instalado.
+- (Windows) Tenta criar a regra de firewall pra porta 7777.
+- Compila o `mcsinc`.
+- Cria uma pasta de teste fake (`~/mc-sinc-cross-test/` no Mac, `%USERPROFILE%\mc-sinc-cross-test\` no Windows) com um `.mxf` aleatório de 3 MB pra ter o que sincronizar.
+- Sobe o binário, abre o browser, e fica monitorando a descoberta mDNS.
+- Quando o outro lado conecta, mostra `✓ Conectado a <peer>` em verde.
+
+A partir daí, é só usar a UI:
+
+1. Em **qualquer** lado, escreva uma mensagem e clique **Enviar**.
+2. No **outro** lado, atualize a página → vai aparecer um card em **Recebidos**.
+3. Clique **Baixar** → o arquivo aterrissa em `mc-sinc-cross-test/MXF/1-<sender>/`.
+4. `Ctrl+C` em cada terminal pra parar.
 
 ---
 
 ## Pré-requisitos
 
-### No Windows
-
-- **Go 1.25+**: instalador oficial em <https://go.dev/dl/>. Depois confirme num PowerShell novo:
-
-  ```powershell
-  go version
-  ```
-
-- **Git for Windows**: <https://git-scm.com/download/win>.
-- **(Opcional)** Liberar execução de scripts PowerShell — só uma vez, em PowerShell como administrador:
-
+- **Go 1.25+** nas duas máquinas. Mac: `brew install go`. Windows: <https://go.dev/dl/>.
+- **Mesma rede** (Wi-Fi/cabo, mesma subnet). VPN, VLAN segregada e Wi-Fi de visitante com client isolation **quebram mDNS**.
+- **Git for Windows** se for clonar pelo PowerShell: <https://git-scm.com/download/win>.
+- **(Windows, uma vez)** Permissão pra rodar scripts PowerShell:
   ```powershell
   Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
   ```
 
-  Sem isso, o `smoke-ui.ps1` é bloqueado por padrão.
-
-### No Mac
-
-- Já está rodando aí. Confirma com `go version` (≥ 1.25).
-
-### Rede
-
-- Ambas as máquinas no **mesmo Wi-Fi/cabo, mesma subnet** (faixa de IP comum, tipo `192.168.x.x`).
-- VPN ligada, Wi-Fi de visitante ("guest network") com isolamento de clientes, ou VLAN segregada **quebram mDNS**.
-- Se as duas máquinas não estiverem se vendo, é quase sempre a rede — checa primeiro com um `ping` entre elas.
-
 ---
 
-## Setup Windows (uma vez)
+## Troubleshooting
 
-1. **Clone** o repositório em qualquer pasta:
+### Os dois terminais ficam em "aguardando peer" pra sempre
 
-   ```powershell
-   git clone https://github.com/Lohan-Costa/mc-sinc.git
-   cd mc-sinc
-   ```
+Quase sempre é rede. Confere na ordem:
 
-2. **Libere a porta 7777 no firewall** (PowerShell como administrador, só na primeira vez):
+1. **Ambas máquinas no mesmo Wi-Fi/cabo?** Faz um `ping` (use o IP impresso por cada script no início). Se o ping não passar, é problema de rede, não do mcsinc.
+2. **VPN ligada?** Desliga.
+3. **Wi-Fi corporativo / de hotel / "Guest"?** Esses ambientes geralmente isolam clientes entre si. Use cabo ou um Wi-Fi doméstico.
+4. **Firewall do Windows?** O script tenta criar a regra; se não rodou como admin, precisa criar manualmente (o script imprime o comando exato).
+5. **Antivírus de terceiros?** Norton/Avast/etc. costumam silenciosamente bloquear mDNS. Desativa temporariamente pra confirmar.
 
-   ```powershell
-   New-NetFirewallRule -DisplayName "MC Sinc" `
-     -Direction Inbound -LocalPort 7777 -Protocol TCP -Action Allow
-   ```
+### Pull falha com badge `FALHOU` (vermelho)
 
-3. **Smoke local primeiro**, pra confirmar que o lado Windows roda de boa antes de tentar cross-máquina:
+- Se o hash não bateu, foi corrupção real de rede. Tenta de novo.
+- Se a conexão caiu, idem.
+- Pra ver detalhes, olha o log no terminal onde o `mcsinc` está rodando — o motivo da falha sai descritivo.
 
-   ```powershell
-   .\scripts\smoke-ui.ps1
-   ```
+### Avid Media Composer interfere?
 
-   Deve abrir o browser default em `http://localhost:7777` com a mesma interface do Mac. Se isso funcionou, o build está OK e o binário roda.
-
----
-
-## Setup Mac (uma vez)
-
-Já está configurado. Pra refrescar:
-
-```bash
-cd "/Users/ciclomedia/Documents/PROGRAMAS COM CLAUDE/MC SINC/mc-sinc"
-git pull
-go build -o mcsinc ./cmd/mcsinc
-```
-
----
-
-## Teste cross-máquina propriamente dito
-
-### 1. Subir os dois nós
-
-**Mac** (terminal):
-
-```bash
-./mcsinc --user mac-dev --port 7777
-```
-
-Deve aparecer no log:
-
-```
-auto-discovery: usando "/Volumes/CICLO-MEDIA/Avid MediaFiles/MXF" (volume "CICLO-MEDIA", último .mdb ...)
-MC Sinc 0.1.0-alpha — user="mac-dev" root="..." http=:7777
-```
-
-**Windows** (PowerShell):
-
-```powershell
-.\mcsinc.exe --user win-dev --port 7777
-```
-
-Se você não tem Avid Media Composer no Windows com pasta `Avid MediaFiles\MXF` na raiz de algum drive, o auto-discovery vai falhar. Nesse caso, crie uma estrutura fake e passe `--root` explícito:
-
-```powershell
-New-Item -ItemType Directory -Force "$env:TEMP\mc-win\MXF\1" | Out-Null
-.\mcsinc.exe --user win-dev --port 7777 --root "$env:TEMP\mc-win\MXF"
-```
-
-### 2. Validar descoberta mútua
-
-Em cada máquina, num **segundo terminal**:
-
-```bash
-# Mac
-curl http://localhost:7777/status
-```
-
-```powershell
-# Windows
-Invoke-RestMethod http://localhost:7777/status
-```
-
-A resposta JSON deve incluir o outro usuário em `peers`. Exemplo do Mac:
-
-```json
-{
-  "user": "mac-dev",
-  "peers": ["win-dev"],
-  ...
-}
-```
-
-**Se `peers` ficar vazio depois de 30 segundos**, vai pra seção [Gotchas](#gotchas-conhecidos) abaixo.
-
-### 3. Ciclo de pull real
-
-**No Mac**, criar um arquivo fake na pasta MXF, stagear, e enviar:
-
-```bash
-# Cria um .mxf qualquer dentro de MXF/1
-dd if=/dev/urandom of="/Volumes/CICLO-MEDIA/Avid MediaFiles/MXF/1/teste-cross.mxf" bs=1M count=3
-
-# Aguarda watcher + hasher (12s)
-sleep 12
-
-# Stage + commit via API
-curl -X POST localhost:7777/stage \
-  -H 'Content-Type: application/json' \
-  -d '{"path":"1/teste-cross.mxf"}'
-
-curl -X POST localhost:7777/commit \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"teste cross-máquina"}'
-```
-
-(Substitua o caminho do `dd` pelo seu root real se for diferente. Você pode descobrir abrindo `http://localhost:7777` no browser e olhando a linha "Pasta raiz".)
-
-**No Windows**, abra `http://localhost:7777` no browser. Em poucos segundos, na seção **Recebidos** deve aparecer:
-
-```
-@mac-dev · <id-do-commit>                              [AGUARDANDO]
-teste cross-máquina
-1 arquivo · 3.0 MB · ...                              [Baixar]
-```
-
-Clique em **Baixar**. O badge vira `BAIXANDO` e depois `BAIXADO`. O arquivo deve aterrissar em:
-
-```
-<seu --root no Windows>\1-mac-dev\teste-cross.mxf
-```
-
-### 4. Conferir integridade
-
-No Windows, confira que o conteúdo é idêntico ao original (`Get-FileHash` ou comparar tamanho):
-
-```powershell
-Get-FileHash "$env:TEMP\mc-win\MXF\1-mac-dev\teste-cross.mxf" -Algorithm SHA256
-```
-
-E no Mac:
-
-```bash
-shasum -a 256 "/Volumes/CICLO-MEDIA/Avid MediaFiles/MXF/1/teste-cross.mxf"
-```
-
-Os SHA-256 devem bater. O MC Sinc já verifica xxhash64 durante o pull e rejeita mismatches — mas conferir SHA-256 manualmente é a última camada de paranoia.
-
----
-
-## Gotchas conhecidos
-
-### `peers` continua vazio
-
-- **Rede errada**: confirme que ambos estão no mesmo Wi-Fi. Wi-Fi com "client isolation" (comum em hotéis e cafés) bloqueia mDNS.
-- **Ping não funciona entre elas**: provavelmente VPN ativa ou Wi-Fi de visitante.
-- **Firewall do Windows**: a regra `New-NetFirewallRule` é por porta TCP — mDNS usa UDP 5353. Versões recentes do Windows permitem mDNS por padrão; se não, libere também UDP 5353.
-- **Avast / Norton / outros**: antivírus de terceiros muitas vezes bloqueiam mDNS sem avisar. Desative temporariamente pra testar.
-
-### Pull falha com "hash mismatch"
-
-- Improvável: significa que o byte que chegou no Windows não bate com o xxhash64 anunciado pelo Mac. Pode ser corrupção real de rede. Repita.
-
-### Pull falha sem mensagem clara
-
-- Olha o log do `mcsinc.exe` no Windows: o erro fica detalhado lá.
-- A janela do Windows fica com o log inline; no Mac, o terminal de origem também.
-
-### Avid Media Composer interfere
-
-- Se você abrir o Avid no meio do teste, o badge do estado dele muda na UI (`aberto (ocioso)` ou `gravando`). O sync continua funcionando — a detecção é apenas informativa nesta versão.
+Não interfere com o sync — a detecção de estado (badge "Avid" no card Status) é só informativa. Pode até abrir o Avid no meio do teste pra ver o badge mudar de "Desconhecido" pra "Aberto (ocioso)".
 
 ---
 
 ## Descobrir o nome do processo do Avid no Windows
 
-A flag `--avid-process-name` controla qual nome o detector procura. O default `AvidMediaComposer` funciona no macOS, mas o `.exe` do Windows pode ter sufixo. Pra descobrir o nome certo:
+Pra que o badge "Avid" funcione no Windows, a flag `--avid-process-name` precisa do nome exato do executável. Default é `AvidMediaComposer` (funciona no macOS). No Windows provavelmente é `AvidMediaComposer.exe` — mas pra confirmar:
 
 1. Abra o Avid Media Composer.
-2. Abra o **Gerenciador de Tarefas** (`Ctrl+Shift+Esc`) → aba **Detalhes**.
-3. Procure uma entrada com "Avid" no nome. Provavelmente é `AvidMediaComposer.exe`.
-4. Rode o `mcsinc.exe` passando esse nome:
-
+2. **Gerenciador de Tarefas** (`Ctrl+Shift+Esc`) → aba **Detalhes**.
+3. Procure uma entrada com "Avid" no nome.
+4. Rode o script com o nome certo:
    ```powershell
-   .\mcsinc.exe --user win-dev --port 7777 --avid-process-name "AvidMediaComposer.exe"
+   .\scripts\cross-test.ps1   # rodaria com default
+   # ou pra customizar, edite o script ou use mcsinc.exe direto:
+   .\mcsinc.exe --user $env:COMPUTERNAME --avid-process-name "AvidMediaComposer.exe"
    ```
 
-5. Conferir em `http://localhost:7777` se o badge "Avid" mostra `ABERTO (OCIOSO)` ou similar (em vez de `DESCONHECIDO`).
-
-Se descobrir um nome diferente do esperado, conta pra gente — vamos atualizar o default.
+Se você descobrir um nome diferente, me avisa pra eu atualizar o default.
 
 ---
 
-## Limpeza após o teste
+## Limpeza
 
-**Mac:**
+Os scripts removem o binário compilado no Ctrl+C, mas **mantêm** a pasta `mc-sinc-cross-test/` (com o `.mxf` que aterrissar) — você confere e deleta à mão quando quiser:
 
 ```bash
-# Apaga os arquivos de teste (não toca em nada que não seja teste-cross.*)
-rm "/Volumes/CICLO-MEDIA/Avid MediaFiles/MXF/1/teste-cross.mxf"
-rm -rf ~/.mcsinc      # zera o manifest local (cuidado se rodar mcsinc com outros projetos)
+# Mac
+rm -rf ~/mc-sinc-cross-test ~/.mcsinc
 ```
-
-**Windows:**
 
 ```powershell
-Remove-Item -Recurse -Force "$env:TEMP\mc-win"
-Remove-Item -Recurse -Force "$env:USERPROFILE\.mcsinc"   # mesma ressalva
+# Windows
+Remove-Item -Recurse -Force $env:USERPROFILE\mc-sinc-cross-test, $env:USERPROFILE\.mcsinc
 ```
 
-Os binários `mcsinc` / `mcsinc.exe` continuam onde estão se você quiser rodar de novo; é só apagar quando for descartar tudo.
+(`~/.mcsinc` é onde o manifest SQLite mora; só apague se não estiver usando o mcsinc com mídia real.)
