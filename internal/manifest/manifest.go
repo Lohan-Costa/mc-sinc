@@ -75,6 +75,26 @@ func (s *Store) migrate() error {
 			updated_at  INTEGER NOT NULL DEFAULT 0
 		);
 		CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
+
+		CREATE TABLE IF NOT EXISTS commits (
+			id          TEXT PRIMARY KEY,
+			author      TEXT NOT NULL,
+			message     TEXT NOT NULL,
+			created_at  INTEGER NOT NULL,
+			direction   TEXT NOT NULL,
+			peer_addr   TEXT NOT NULL DEFAULT '',
+			status      TEXT NOT NULL DEFAULT 'announced'
+		);
+		CREATE INDEX IF NOT EXISTS idx_commits_direction ON commits(direction);
+		CREATE INDEX IF NOT EXISTS idx_commits_status ON commits(status);
+
+		CREATE TABLE IF NOT EXISTS commit_files (
+			commit_id TEXT NOT NULL,
+			path      TEXT NOT NULL,
+			hash      TEXT NOT NULL,
+			size      INTEGER NOT NULL,
+			PRIMARY KEY (commit_id, path)
+		);
 	`)
 	return err
 }
