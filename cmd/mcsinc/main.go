@@ -26,6 +26,7 @@ import (
 	"github.com/Lohan-Costa/mc-sinc/internal/automode"
 	"github.com/Lohan-Costa/mc-sinc/internal/avid"
 	"github.com/Lohan-Costa/mc-sinc/internal/commit"
+	"github.com/Lohan-Costa/mc-sinc/internal/config"
 	"github.com/Lohan-Costa/mc-sinc/internal/discovery"
 	"github.com/Lohan-Costa/mc-sinc/internal/hasher"
 	logpkg "github.com/Lohan-Costa/mc-sinc/internal/logging"
@@ -80,6 +81,25 @@ func run() error {
 	}
 	defer cleanupLog()
 
+	// Ordem de precedência do --root:
+	//   1. flag CLI (--root=...) explícita
+	//   2. config.json persistido (editável via UI)
+	//   3. auto-discovery (varre volumes Avid conhecidos)
+	if *root == "" {
+		cfg, cerr := config.Load(defaultConfigPath())
+		if cerr != nil {
+			slog.Warn("config.Load falhou — seguindo sem config persistente",
+				slog.String("module", "main"),
+				slog.String("event_id", "CONFIG_LOAD_FAIL"),
+				slog.String("error", cerr.Error()))
+		} else if cfg.Root != "" {
+			*root = cfg.Root
+			slog.Info("root carregado do config.json",
+				slog.String("module", "main"),
+				slog.String("event_id", "CONFIG_ROOT_LOADED"),
+				slog.String("root", cfg.Root))
+		}
+	}
 	if *root == "" {
 		chosen, err := autoDiscoverRoot()
 		if err != nil {
@@ -158,6 +178,7 @@ func run() error {
 		Transport:   tport,
 		Web:         webRoot,
 		AvidProcess: *avidProcess,
+		ConfigPath:  defaultConfigPath(),
 		Lifecycle:   ctx, // cancela fan-outs de background no shutdown
 	})
 
@@ -304,6 +325,14 @@ func defaultUser() string {
 		return h
 	}
 	return "mcsinc-user"
+}
+
+func defaultConfigPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "config.json"
+	}
+	return filepath.Join(home, ".mcsinc", "config.json")
 }
 
 func defaultDBPath() string {

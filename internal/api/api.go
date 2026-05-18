@@ -32,6 +32,7 @@ import (
 
 	"github.com/Lohan-Costa/mc-sinc/internal/avid"
 	"github.com/Lohan-Costa/mc-sinc/internal/commit"
+	"github.com/Lohan-Costa/mc-sinc/internal/config"
 	"github.com/Lohan-Costa/mc-sinc/internal/discovery"
 	logpkg "github.com/Lohan-Costa/mc-sinc/internal/logging"
 	"github.com/Lohan-Costa/mc-sinc/internal/manifest"
@@ -45,6 +46,7 @@ type Server struct {
 	user        string
 	root        string
 	version     string
+	configPath  string
 	store       *manifest.Store
 	commits     *commit.Service
 	discovery   *discovery.Discovery
@@ -73,6 +75,10 @@ type Config struct {
 	Web         fs.FS // sistema de arquivos com a UI (`web/`)
 	AvidProcess string // nome do processo do Avid pra detecção (ex: "Avid Media Composer")
 
+	// ConfigPath: arquivo de config persistente (ex: ~/.mcsinc/config.json).
+	// Se vazio, GET/POST /config respondem 503 (não configurado).
+	ConfigPath string
+
 	// Lifecycle: ctx que controla as goroutines de fan-out. Quando
 	// cancelado, Send/Pull em curso abortam. Opcional — default é
 	// context.Background() (goroutines rodam até completar).
@@ -89,6 +95,7 @@ func New(cfg Config) *Server {
 		user:        cfg.User,
 		root:        cfg.Root,
 		version:     cfg.Version,
+		configPath:  cfg.ConfigPath,
 		store:       cfg.Store,
 		commits:     cfg.Commits,
 		discovery:   cfg.Discovery,
@@ -135,6 +142,9 @@ func (s *Server) Handler() http.Handler {
 	r.Post("/commits/{id}/pull", s.handlePull)
 	r.Post("/commits/{id}/reject", s.handleReject)
 	r.Post("/commits/clear", s.handleClearFinished)
+
+	r.Get("/config", s.handleGetConfig)
+	r.Post("/config", s.handlePostConfig)
 
 	if s.transport != nil {
 		r.Mount("/peer", s.transport.Routes())
@@ -425,6 +435,53 @@ func (s *Server) handleClearFinished(w http.ResponseWriter, r *http.Request) {
 		slog.String("event_id", "COMMIT_CLEAR_OK"),
 		slog.Int64("count", n))
 	writeJSON(w, http.StatusOK, map[string]int64{"removed": n})
+}
+
+// handleGetConfig devolve o config persistente atual. Útil pra UI
+// pré-preencher o campo "Pasta raiz" com o valor salvo (que pode
+// diferir do *root em runtime quando o usuário acabou de editar mas
+// ainda não reiniciou).
+func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
+	if s.configPath == "" {
+		http.Error(w, "config path nao configurado", http.StatusServiceUnavailable)
+		return
+	}
+	cfg, err := config.Load(s.configPath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+// handlePostConfig salva alterações no config.json. NÃO reconfigura
+// watcher/manifest em runtime — exige reinício do mcsinc. UI mostra
+// aviso "reinicie pra aplicar".
+func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
+	if s.configPath == "" {
+		http.Error(w, "config path nao configurado", http.StatusServiceUnavailable)
+		return
+	}
+	var req config.Persistent
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := config.Save(s.configPath, req); err != nil {
+		slog.WarnContext(r.Context(), "config.Save falhou",
+			slog.String("module", logModule),
+			slog.String("event_id", "CONFIG_SAVE_FAIL"),
+			slog.String("error", err.Error()))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	slog.InfoContext(r.Context(), "config persistido — aplicar requer restart",
+		slog.String("module", logModule),
+		slog.String("event_id", "CONFIG_SAVED"),
+		slog.String("new_root", req.Root))
+	writeJSON(w, http.StatusOK, map[string]string{
+		"message": "Config salvo. Reinicie o MC Sinc para aplicar.",
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, body interface{}) {

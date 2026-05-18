@@ -65,6 +65,16 @@
       margin-left: .35rem;
     }
     button.reject-btn:hover:not(:disabled) { background: rgba(248,113,113,.1); }
+    .root-edit { display: flex; gap: .5rem; margin-top: 1rem; align-items: center; }
+    .root-edit input { flex: 1; min-width: 0; }
+    button.primary { background: var(--accent); color: #fff; border: 0; padding: .5rem 1rem; border-radius: 6px; cursor: pointer; font-size: .9rem; }
+    .restart-warn {
+      margin-top: .75rem; padding: .6rem .8rem;
+      background: rgba(251, 191, 36, .12);
+      border: 1px solid rgba(251, 191, 36, .35);
+      border-radius: 6px; color: var(--warn); font-size: .9rem;
+    }
+    #root-edit-btn { margin-left: .5rem; font-size: .75rem; padding: .15rem .5rem; }
     .status-grid { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; font-size: .95rem; }
     .status-grid dt { color: var(--muted); }
     ul.files { list-style: none; padding: 0; margin: 0; }
@@ -176,10 +186,20 @@
       <h2 id="title-status"></h2>
       <dl class="status-grid">
         <dt id="label-user"></dt><dd id="user">—</dd>
-        <dt id="label-root"></dt><dd id="root">—</dd>
+        <dt id="label-root"></dt>
+        <dd>
+          <span id="root">—</span>
+          <button id="root-edit-btn" class="ghost muted" hidden></button>
+        </dd>
         <dt id="label-connected"></dt><dd id="peers">—</dd>
         <dt id="label-avid"></dt><dd id="avid">—</dd>
       </dl>
+      <div id="root-edit" class="root-edit" hidden>
+        <input type="text" id="root-input" />
+        <button id="root-save-btn" class="primary"></button>
+        <button id="root-cancel-btn" class="ghost"></button>
+      </div>
+      <div id="restart-warn" class="restart-warn" hidden></div>
     </section>
 
     <section class="panel">
@@ -259,6 +279,11 @@
         confirmRejectAll: 'Rejeitar todos os commits aguardando?',
         confirmClearHistory: 'Apagar commits já baixados/rejeitados/falhos?',
         alertRejectFail: 'Falha ao rejeitar: ',
+        rootEditBtn: 'Editar',
+        rootSaveBtn: 'Salvar',
+        rootCancelBtn: 'Cancelar',
+        rootRestartWarn: 'Reinicie o MC Sinc para usar a nova pasta raiz.',
+        alertRootSaveFail: 'Falha ao salvar pasta raiz: ',
 
         // Pluralização. Recebe n; cada língua define a regra que quiser.
         fileCount: (n) => `${n} arquivo${n === 1 ? '' : 's'}`,
@@ -325,6 +350,12 @@
       document.getElementById('receive-all-btn').textContent = t.receiveAllBtn;
       document.getElementById('reject-all-btn').textContent = t.rejectAllBtn;
       document.getElementById('clear-history-btn').textContent = t.clearHistoryBtn;
+      document.getElementById('root-edit-btn').textContent = t.rootEditBtn;
+      document.getElementById('root-save-btn').textContent = t.rootSaveBtn;
+      document.getElementById('root-cancel-btn').textContent = t.rootCancelBtn;
+      document.getElementById('restart-warn').textContent = t.rootRestartWarn;
+      // Botão Editar só aparece após primeiro refresh (precisa do root atual).
+      document.getElementById('root-edit-btn').hidden = false;
 
       // Os <li class="empty"> e <div class="empty"> que começam vazios viram
       // "carregando…" até o primeiro refresh popular a lista de verdade.
@@ -713,6 +744,39 @@
         if (!r.ok) alert(t.alertError + await r.text());
       } catch (e) { alert(t.alertError + e.message); }
       refresh();
+    });
+
+    // Editar pasta raiz: abre input, salva via POST /config, mostra aviso
+    // de restart. Não reconfigura nada em runtime — uma sessão futura
+    // sobe com o novo --root via config.json.
+    document.getElementById('root-edit-btn').addEventListener('click', () => {
+      const current = document.getElementById('root').textContent;
+      document.getElementById('root-input').value = current === '—' ? '' : current;
+      document.getElementById('root-edit').hidden = false;
+      document.getElementById('root-edit-btn').hidden = true;
+    });
+    document.getElementById('root-cancel-btn').addEventListener('click', () => {
+      document.getElementById('root-edit').hidden = true;
+      document.getElementById('root-edit-btn').hidden = false;
+    });
+    document.getElementById('root-save-btn').addEventListener('click', async () => {
+      const newRoot = document.getElementById('root-input').value.trim();
+      try {
+        const r = await fetch('/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ root: newRoot }),
+        });
+        if (!r.ok) {
+          alert(t.alertRootSaveFail + await r.text());
+          return;
+        }
+        document.getElementById('root-edit').hidden = true;
+        document.getElementById('root-edit-btn').hidden = false;
+        document.getElementById('restart-warn').hidden = false;
+      } catch (e) {
+        alert(t.alertError + e.message);
+      }
     });
 
     // Boot

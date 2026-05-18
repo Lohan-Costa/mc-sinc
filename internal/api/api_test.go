@@ -335,6 +335,63 @@ func TestHandleUnstageVoltaParaDiscovered(t *testing.T) {
 	}
 }
 
+func TestHandleConfigGetSetRoundtrip(t *testing.T) {
+	// Helper local: cria env com ConfigPath setado.
+	store, err := manifest.Open(filepath.Join(t.TempDir(), "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	srv := api.New(api.Config{
+		User:       "alice",
+		Root:       "/initial",
+		Version:    "v",
+		Store:      store,
+		Commits:    commit.New(store, "alice"),
+		Transport:  &stubTransport{},
+		ConfigPath: cfgPath,
+	})
+	mux := srv.Handler()
+
+	// GET inicial: arquivo não existe, devolve config zerado.
+	req := httptest.NewRequest("GET", "/config", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET code=%d, body=%s", rr.Code, rr.Body.String())
+	}
+
+	// POST salva.
+	body := []byte(`{"root":"/Volumes/Avid/MXF"}`)
+	req2 := httptest.NewRequest("POST", "/config", bytes.NewReader(body))
+	rr2 := httptest.NewRecorder()
+	mux.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("POST code=%d, body=%s", rr2.Code, rr2.Body.String())
+	}
+
+	// GET de novo confirma persistência.
+	req3 := httptest.NewRequest("GET", "/config", nil)
+	rr3 := httptest.NewRecorder()
+	mux.ServeHTTP(rr3, req3)
+	var got map[string]string
+	_ = json.Unmarshal(rr3.Body.Bytes(), &got)
+	if got["root"] != "/Volumes/Avid/MXF" {
+		t.Errorf("root persistido=%q", got["root"])
+	}
+}
+
+func TestHandleConfigSemConfigPathDevolve503(t *testing.T) {
+	// Sem ConfigPath, endpoint não responde.
+	e := newTestEnv(t)
+	rr := e.request(t, "GET", "/config", nil)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("code=%d, esperava 503", rr.Code)
+	}
+}
+
 func TestHandleRejectMudaStatus(t *testing.T) {
 	e := newTestEnv(t)
 	must(t, e.store.SaveCommit(manifest.Commit{
