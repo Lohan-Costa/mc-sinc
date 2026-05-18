@@ -75,7 +75,11 @@ func (t *Transport) handleAnnounce(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "file missing hash/path", http.StatusBadRequest)
 			return
 		}
-		files = append(files, manifest.CommitFile{Path: f.Path, Hash: f.Hash, Size: f.Size})
+		// Defensivo: senders novos normalizam pra forward slash em commit.go,
+		// mas se algum sender antigo (ou outro transport futuro) mandar com
+		// backslash, normaliza aqui antes de persistir.
+		normalized := strings.ReplaceAll(f.Path, `\`, "/")
+		files = append(files, manifest.CommitFile{Path: normalized, Hash: f.Hash, Size: f.Size})
 	}
 
 	mc := manifest.Commit{

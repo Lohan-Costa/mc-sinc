@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -174,7 +175,11 @@ func (t *Transport) pullOne(ctx context.Context, peerAddr, commitID string, f ma
 	}
 	defer stream.Close()
 
-	filename := filepath.Base(f.Path)
+	// path.Base (não path/filepath.Base): f.Path é forward-slash de
+	// protocolo. filepath.Base no Unix não reconheceria backslash, mas
+	// FileSpec é normalizado no sender; usar path.Base remove a chance
+	// de regressão se alguém esquecer a normalização.
+	filename := path.Base(f.Path)
 	finalPath := filepath.Join(destDir, filename)
 	tmpPath := finalPath + ".part"
 
