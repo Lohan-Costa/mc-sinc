@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -271,6 +272,49 @@ func saveSent(t *testing.T, store *manifest.Store, c *commit.Commit) {
 	}
 	if err := store.SaveCommit(mc); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Cenário real do log do Lohan: Windows tinha exe pré-fix, então o
+// manifest do sender armazenou f.Path com backslash. O receiver Mac
+// (com fix) pediu com forward slash. Sem normalize, FILE_NOT_ALLOWED.
+// Este teste simula esse manifest legado no Alice e confirma que a
+// fix defensiva no handleFile permite o pull.
+func TestHandleFileNormalizaCompareEPath(t *testing.T) {
+	alice := newNode(t, "alice")
+
+	payload := []byte("hello cross-os")
+	// Arquivo fisico em MXF/1/clip.mxf (normal).
+	spec := alice.writeMXF(t, "clip.mxf", payload)
+
+	// Manifest do Alice tem f.Path com backslash (pre-fix Windows).
+	legacy := manifest.Commit{
+		ID:        "01020304deadbeef",
+		Author:    "alice",
+		Direction: manifest.DirectionSent,
+		Status:    manifest.CommitStatusAnnounced,
+		Files: []manifest.CommitFile{
+			{Path: `1\clip.mxf`, Hash: spec.Hash, Size: spec.Size},
+		},
+	}
+	if err := alice.store.SaveCommit(legacy); err != nil {
+		t.Fatal(err)
+	}
+
+	// Receiver pede com forward slash, como o codigo novo gera.
+	url := alice.server.URL + "/peer/files/" + legacy.ID + "/1/clip.mxf"
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d, body=%s", resp.StatusCode, body)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if string(got) != string(payload) {
+		t.Errorf("body=%q, esperava %q", got, payload)
 	}
 }
 

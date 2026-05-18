@@ -163,26 +163,41 @@ func (t *Transport) handleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Normaliza pra forward slash + sem prefixo "/" antes da comparação.
+	// Defensivo: cobre commits velhos no manifest (sender pré-fix de
+	// commit.go ainda tem \) e receivers que enviem URL com / extra.
+	relNorm := strings.TrimPrefix(strings.ReplaceAll(rel, `\`, "/"), "/")
+
 	allowed := false
 	for _, f := range c.Files {
-		if f.Path == rel {
+		if strings.ReplaceAll(f.Path, `\`, "/") == relNorm {
 			allowed = true
 			break
 		}
 	}
 	if !allowed {
 		// Path fora da lista do commit — bloqueio de leitura arbitrária.
+		// Inclui manifest_paths no log pra facilitar debug futuro: se for
+		// mismatch de separador, fica óbvio comparando rel com a lista.
+		manifestPaths := make([]string, 0, len(c.Files))
+		for _, f := range c.Files {
+			manifestPaths = append(manifestPaths, f.Path)
+		}
 		slog.WarnContext(ctx, "/peer/files pediu path fora do manifesto do commit",
 			slog.String("module", logModule),
 			slog.String("event_id", "FILE_NOT_ALLOWED"),
 			slog.String("commit_id", id),
 			slog.String("path", rel),
+			slog.String("path_normalized", relNorm),
+			slog.String("manifest_paths", strings.Join(manifestPaths, ",")),
 			slog.String("from", r.RemoteAddr))
 		http.NotFound(w, r)
 		return
 	}
 
-	full := filepath.Join(t.root, rel)
+	// filepath.Join no Windows aceita /, mas explicitar FromSlash é menos
+	// frágil que confiar em comportamento implícito do stdlib.
+	full := filepath.Join(t.root, filepath.FromSlash(relNorm))
 	f, err := os.Open(full)
 	if err != nil {
 		slog.ErrorContext(ctx, "falha abrindo arquivo pra servir",
