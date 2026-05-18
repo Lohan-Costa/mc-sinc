@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -263,6 +264,29 @@ func TestHandleCommitInclueTudoComHash(t *testing.T) {
 	if got := e.tport.sent(); len(got) != 1 || got[0] != c.ID {
 		t.Errorf("transport.Send chamou com %v, esperava [%s]", got, c.ID)
 	}
+}
+
+// Mensagem vazia no /commit deve gerar default "envio manual em ...".
+func TestHandleCommitMensagemVaziaUsaDefault(t *testing.T) {
+	e := newTestEnv(t)
+	must(t, e.store.Upsert(manifest.File{
+		Path: "1/x.mxf", Hash: "h", Size: 1,
+		ModifiedAt: time.Now(), Status: manifest.StatusDiscovered,
+	}))
+
+	// body sem campo message
+	rr := e.request(t, "POST", "/commit", []byte(`{}`))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code=%d, body=%s", rr.Code, rr.Body.String())
+	}
+	var c commit.Commit
+	if err := json.Unmarshal(rr.Body.Bytes(), &c); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(c.Message, "envio manual em ") {
+		t.Errorf("Message=%q, esperava prefixo 'envio manual em '", c.Message)
+	}
+	_ = e.srv.Wait(timeoutCtx(t, 2*time.Second))
 }
 
 func TestHandleCommitSemNadaComHashDevolve400(t *testing.T) {

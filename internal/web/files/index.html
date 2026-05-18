@@ -212,7 +212,7 @@
         // Pendentes
         loading: 'carregando…',
         emptyPending: 'sem arquivos pendentes — siga editando.',
-        messagePlaceholder: 'mensagem do envio (ex: cenas 12-14)',
+        messagePlaceholder: 'mensagem (opcional)',
         sendBtn: 'Enviar pasta',
         hashCalculating: 'calculando hash…',
 
@@ -248,7 +248,6 @@
         avidLastMdb: (formatted) => `último .mdb: ${formatted}`,
 
         // Alerts
-        alertWriteMsg: 'Escreva uma mensagem antes de enviar.',
         alertSendFail: 'Falha ao enviar: ',
         alertPullFail: 'Falha ao baixar: ',
         alertError: 'Erro: ',
@@ -566,8 +565,9 @@
     }
 
     document.getElementById('commit-btn').addEventListener('click', async () => {
+      // Mensagem é opcional — backend gera "envio manual em DD/MM/AAAA HH:MM"
+      // se vier vazia.
       const msg = document.getElementById('message').value.trim();
-      if (!msg) { alert(t.alertWriteMsg); return; }
       const r = await fetch('/commit', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},

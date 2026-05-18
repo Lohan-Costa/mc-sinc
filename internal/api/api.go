@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -278,7 +279,14 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c, err := s.commits.Commit(r.Context(), req.Message)
+	// Mensagem é opcional — se vazia, geramos uma default com timestamp
+	// pra o usuário não precisar pensar num texto pra cada envio.
+	msg := strings.TrimSpace(req.Message)
+	if msg == "" {
+		msg = "envio manual em " + time.Now().Format("02/01/2006 15:04")
+	}
+
+	c, err := s.commits.Commit(r.Context(), msg)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

@@ -277,7 +277,8 @@ func autoCommit(ctx context.Context, cfg Config, snap avid.Snapshot) {
 	}
 }
 
-// defaultAutoCommitMsg gera a mensagem default ("auto: YYYY-MM-DD HH:MM").
+// defaultAutoCommitMsg gera a mensagem default ("envio automático em
+// DD/MM/AAAA HH:MM").
 func defaultAutoCommitMsg() string {
-	return fmt.Sprintf("auto: %s", time.Now().Format("2006-01-02 15:04"))
+	return fmt.Sprintf("envio automático em %s", time.Now().Format("02/01/2006 15:04"))
 }
