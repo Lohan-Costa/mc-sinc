@@ -47,8 +47,19 @@ type Store struct {
 }
 
 // Open abre (ou cria) o manifest no caminho dado.
+//
+// DSN configurado pra coexistência saudável com handlers HTTP concorrentes:
+//   - _journal=WAL:           Write-Ahead Log permite leitura paralela com
+//                             escrita; sem ele, qualquer concorrência levanta
+//                             SQLITE_BUSY imediatamente.
+//   - _busy_timeout=5000:     se mesmo com WAL houver contenção, espera até
+//                             5s antes de devolver erro — handlers paralelos
+//                             se atravessam sem falhar.
+//   - _foreign_keys=on:       saúde de schema (impacto zero hoje porque não
+//                             declaramos FK, mas é bom hábito).
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	dsn := path + "?_journal=WAL&_busy_timeout=5000&_foreign_keys=on"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
