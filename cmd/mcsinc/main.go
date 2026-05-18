@@ -77,6 +77,21 @@ func main() {
 		*root = chosen
 	}
 
+	// Fast-fail: --root precisa existir e ser diretório. Sem isso, watcher,
+	// hasher, avid.Detect e transport batem em erro a cada operação.
+	if info, statErr := os.Stat(*root); statErr != nil || !info.IsDir() {
+		slog.Error("--root inválido: não existe ou não é diretório",
+			slog.String("module", "main"),
+			slog.String("event_id", "ROOT_INVALID"),
+			slog.String("root", *root))
+		fmt.Fprintf(os.Stderr,
+			"\nMC Sinc: a pasta --root nao existe ou nao e diretorio:\n  %s\n\n"+
+				"Crie a estrutura (ex: 'mkdir -p \"%s/1\"') ou aponte --root\n"+
+				"pra uma pasta MXF existente do Avid.\n\n",
+			*root, *root)
+		os.Exit(1)
+	}
+
 	if err := os.MkdirAll(filepath.Dir(*dbP), 0o755); err != nil {
 		slog.Error("não consegui criar diretório do db",
 			slog.String("module", "main"), slog.String("error", err.Error()))
