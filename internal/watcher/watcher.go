@@ -8,6 +8,7 @@ package watcher
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,7 +84,11 @@ func (w *Watcher) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			_ = err // TODO: logger
+			slog.Warn("erro do fsnotify",
+				slog.String("module", "watcher"),
+				slog.String("event_id", "WATCHER_ERROR"),
+				slog.String("root", w.root),
+				slog.String("error", err.Error()))
 		}
 	}
 }
