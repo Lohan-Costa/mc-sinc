@@ -105,13 +105,17 @@ try {
     $ErrPath = Join-Path $TestDir 'mcsinc.err'
     $DbPath  = Join-Path $TestDir 'manifest.db'
 
+    # Aspas literais em paths: Start-Process -ArgumentList @(...) no PS 5.1
+    # serializa o array sem re-quoting; sem aspas, paths como
+    # "C:\Users\CICLO MEDIA\..." sao cortados no espaco pelo SO.
+    $RootArg = Join-Path $TestDir 'MXF'
     $script:proc = Start-Process `
         -FilePath $BinPath `
         -ArgumentList @(
-            '--root',  (Join-Path $TestDir 'MXF'),
-            '--user',  $UserId,
+            '--root',  "`"$RootArg`"",
+            '--user',  "`"$UserId`"",
             '--port',  "$Port",
-            '--db',    $DbPath
+            '--db',    "`"$DbPath`""
         ) `
         -PassThru -NoNewWindow `
         -RedirectStandardOutput $LogPath `
