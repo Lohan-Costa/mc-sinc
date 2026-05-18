@@ -76,6 +76,26 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 }
 
+// isSafeForAuto decide se o estado atual permite operações automáticas.
+//
+//   - StateIdle: Avid fechado E .mdb parado >= RecentWindow. Caso canônico.
+//   - StateUnknown + !ProcessRunning: nenhum .mdb encontrado no --root
+//     (pasta de teste, pasta sem mídia Avid, etc) E o processo do Avid
+//     não está rodando em lugar nenhum. Como não há .mdb pra ser
+//     corrompido e nada está editando, é seguro.
+//
+// StateUnknown + ProcessRunning: Avid pode estar editando outra raiz —
+// seguro pra ESTA raiz, mas conservador: bloqueia.
+func isSafeForAuto(s avid.Snapshot) bool {
+	if s.State == avid.StateIdle {
+		return true
+	}
+	if s.State == avid.StateUnknown && !s.ProcessRunning {
+		return true
+	}
+	return false
+}
+
 func tick(ctx context.Context, cfg Config) {
 	snap, err := cfg.Detect()
 	if err != nil {
@@ -85,9 +105,15 @@ func tick(ctx context.Context, cfg Config) {
 			slog.String("error", err.Error()))
 		return
 	}
-	if snap.State != avid.StateIdle {
-		// Estado não é seguro pra auto-pull. Não logamos pra não poluir
-		// (acontece a cada tick enquanto Avid não está idle).
+	if !isSafeForAuto(snap) {
+		// Estado não é seguro pra auto-mode. Debug-level pra não poluir
+		// info em tick periódico, mas observável quando precisa investigar
+		// "por que auto-pull não dispara".
+		slog.DebugContext(ctx, "automode skip — estado nao eh seguro",
+			slog.String("module", logModule),
+			slog.String("event_id", "AUTOMODE_SKIP"),
+			slog.String("state", string(snap.State)),
+			slog.Bool("process_running", snap.ProcessRunning))
 		return
 	}
 

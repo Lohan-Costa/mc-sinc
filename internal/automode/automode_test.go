@@ -128,6 +128,54 @@ func TestAutoModeNaoDisparaEmStateBusy(t *testing.T) {
 	}
 }
 
+// StateUnknown + !ProcessRunning eh tratado como SAFE: --root pode ser
+// pasta de teste sem .mdb, mas se nada esta editando, eh seguro.
+func TestAutoModeDisparaEmUnknownSemProcesso(t *testing.T) {
+	store := newFakeStore()
+	store.set(manifest.DirectionReceived, manifest.CommitStatusAnnounced, []manifest.Commit{
+		{ID: "c1"},
+	})
+	tport := &fakeTransport{}
+
+	cfg := automode.Config{
+		Detect: func() (avid.Snapshot, error) {
+			return avid.Snapshot{State: avid.StateUnknown, ProcessRunning: false}, nil
+		},
+		Store:     store,
+		Transport: tport,
+		Interval:  10 * time.Millisecond,
+	}
+	runUntil(t, cfg, 50*time.Millisecond)
+
+	if got := tport.pulledIDs(); len(got) == 0 {
+		t.Errorf("Pull deveria ter sido chamado em Unknown sem processo Avid")
+	}
+}
+
+// StateUnknown + ProcessRunning bloqueia: Avid pode estar editando em
+// outro --root, melhor nao mexer.
+func TestAutoModeNaoDisparaEmUnknownComProcesso(t *testing.T) {
+	store := newFakeStore()
+	store.set(manifest.DirectionReceived, manifest.CommitStatusAnnounced, []manifest.Commit{
+		{ID: "c1"},
+	})
+	tport := &fakeTransport{}
+
+	cfg := automode.Config{
+		Detect: func() (avid.Snapshot, error) {
+			return avid.Snapshot{State: avid.StateUnknown, ProcessRunning: true}, nil
+		},
+		Store:     store,
+		Transport: tport,
+		Interval:  10 * time.Millisecond,
+	}
+	runUntil(t, cfg, 50*time.Millisecond)
+
+	if got := tport.pulledIDs(); len(got) != 0 {
+		t.Errorf("Pull nao deveria disparar em Unknown com processo Avid rodando; got %v", got)
+	}
+}
+
 func TestAutoModeNaoDisparaEmRecentlyClosed(t *testing.T) {
 	store := newFakeStore()
 	store.set(manifest.DirectionReceived, manifest.CommitStatusAnnounced, []manifest.Commit{
