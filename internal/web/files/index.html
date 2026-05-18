@@ -128,6 +128,7 @@
     .badge.recently_closed { background: #2a2e38; color: var(--muted); }
     .badge.idle            { background: rgba(74,222,128,.15); color: var(--ok); }
     .badge.unknown         { background: #2a2e38; color: var(--muted); }
+    .badge.disconnected    { background: rgba(248, 113, 113, .15); color: var(--danger); }
 
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
     .badge.pulling { animation: pulse 1.6s ease-in-out infinite; }
@@ -142,6 +143,7 @@
   <header>
     <h1>MC Sinc <small id="version"></small></h1>
     <span class="header-right">
+      <span id="connection-badge" class="badge disconnected" hidden></span>
       <select id="lang-select" hidden></select>
       <span id="user-badge" class="empty"></span>
     </span>
@@ -245,6 +247,10 @@
         alertSendFail: 'Falha ao enviar: ',
         alertPullFail: 'Falha ao baixar: ',
         alertError: 'Erro: ',
+
+        // Connection badge (aparece quando o backend não responde)
+        connectionError: 'desconectado',
+        connectionRetryingIn: (s) => `tentando em ${s}s`,
       },
       // 'en-US': { ... } — adicionar aqui pra habilitar o seletor.
     };
@@ -472,9 +478,65 @@
         } else {
           sentList.innerHTML = sent.map(renderSentCard).join('');
         }
+        // Sucesso completo — limpa qualquer indicador de erro pendente.
+        onRefreshSuccess();
+        return true;
       } catch (e) {
         console.error(e);
+        onRefreshError();
+        return false;
       }
+    }
+
+    // ===========================================================================
+    // Scheduler do refresh com backoff em falha
+    //
+    // setInterval rígido (4s) escondia falhas: em rede instável a UI ficava com
+    // dados velhos sem feedback ao usuário. Agora cada execução agenda a próxima
+    // com setTimeout, e o intervalo dobra a cada falha consecutiva até 64s. O
+    // badge "desconectado" aparece a partir da 2ª falha.
+    // ===========================================================================
+    const BASE_INTERVAL_MS = 4000;
+    const MAX_BACKOFF_STEP = 4; // 4s * 2^4 = 64s teto
+    let consecutiveFailures = 0;
+    let nextRefreshTimer = null;
+
+    function onRefreshSuccess() {
+      consecutiveFailures = 0;
+      hideConnectionBadge();
+    }
+
+    function onRefreshError() {
+      consecutiveFailures += 1;
+      if (consecutiveFailures >= 2) {
+        showConnectionBadge();
+      }
+    }
+
+    function nextIntervalMs() {
+      const step = Math.min(consecutiveFailures, MAX_BACKOFF_STEP);
+      return BASE_INTERVAL_MS * Math.pow(2, step === 0 ? 0 : step - 1);
+    }
+
+    function showConnectionBadge() {
+      const badge = document.getElementById('connection-badge');
+      const secs = Math.round(nextIntervalMs() / 1000);
+      badge.textContent = `${t.connectionError} · ${t.connectionRetryingIn(secs)}`;
+      badge.hidden = false;
+    }
+
+    function hideConnectionBadge() {
+      document.getElementById('connection-badge').hidden = true;
+    }
+
+    function scheduleNext() {
+      if (nextRefreshTimer) clearTimeout(nextRefreshTimer);
+      nextRefreshTimer = setTimeout(runRefreshLoop, nextIntervalMs());
+    }
+
+    async function runRefreshLoop() {
+      await refresh(); // refresh nunca rejeita; sinaliza erro via return false
+      scheduleNext();
     }
 
     document.getElementById('commit-btn').addEventListener('click', async () => {
@@ -532,8 +594,7 @@
     document.documentElement.lang = currentLang;
     applyStaticStrings();
     initLangSelect();
-    refresh();
-    setInterval(refresh, 4000);
+    runRefreshLoop();
   </script>
 </body>
 </html>
