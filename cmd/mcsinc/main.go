@@ -13,7 +13,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -38,6 +37,15 @@ import (
 const version = "0.1.0-alpha"
 
 func main() {
+	// Toda a lógica vive em run() para que defers (cleanupLog, store.Close,
+	// cancel) rodem em qualquer caminho de erro. Erros já são slog-ados onde
+	// acontecem; aqui só traduzimos para exit code.
+	if err := run(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	var (
 		root        = flag.String("root", "", "raiz da pasta MXF do Avid; auto-detectado se omitido")
 		user        = flag.String("user", defaultUser(), "identificador deste editor na rede")
@@ -62,7 +70,8 @@ func main() {
 		Root:       *root,
 	})
 	if err != nil {
-		log.Fatalf("logging.Init: %v", err)
+		fmt.Fprintln(os.Stderr, "logging.Init:", err)
+		return err
 	}
 	defer cleanupLog()
 
@@ -73,7 +82,7 @@ func main() {
 				slog.String("module", "main"),
 				slog.String("event_id", "STARTUP_NO_ROOT"),
 				slog.String("error", err.Error()))
-			os.Exit(1)
+			return err
 		}
 		*root = chosen
 	}
@@ -90,19 +99,19 @@ func main() {
 				"Crie a estrutura (ex: 'mkdir -p \"%s/1\"') ou aponte --root\n"+
 				"pra uma pasta MXF existente do Avid.\n\n",
 			*root, *root)
-		os.Exit(1)
+		return errors.New("--root inválido")
 	}
 
 	if err := os.MkdirAll(filepath.Dir(*dbP), 0o755); err != nil {
 		slog.Error("não consegui criar diretório do db",
 			slog.String("module", "main"), slog.String("error", err.Error()))
-		os.Exit(1)
+		return err
 	}
 
 	store, err := manifest.Open(*dbP)
 	if err != nil {
 		slog.Error("falha abrindo manifest", slog.String("module", "main"), slog.String("error", err.Error()))
-		os.Exit(1)
+		return err
 	}
 	defer store.Close()
 
@@ -118,7 +127,7 @@ func main() {
 	w, err := watcher.New(localFolder)
 	if err != nil {
 		slog.Error("falha criando watcher", slog.String("module", "main"), slog.String("error", err.Error()))
-		os.Exit(1)
+		return err
 	}
 
 	h := hasher.New(store, *root)
@@ -128,7 +137,7 @@ func main() {
 	webRoot, err := web.FS()
 	if err != nil {
 		slog.Error("falha preparando UI", slog.String("module", "main"), slog.String("error", err.Error()))
-		os.Exit(1)
+		return err
 	}
 
 	srv := api.New(api.Config{
@@ -152,6 +161,9 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	// Canal sinaliza saída anormal do servidor HTTP (porta em uso, etc.).
+	// Buffered pra não bloquear a goroutine se ninguém estiver lendo.
+	httpErr := make(chan error, 1)
 	go func() {
 		slog.Info("MC Sinc iniciado",
 			slog.String("module", "main"),
@@ -165,7 +177,7 @@ func main() {
 				slog.String("module", "main"),
 				slog.String("event_id", "HTTP_FAIL"),
 				slog.String("error", err.Error()))
-			os.Exit(1)
+			httpErr <- err
 		}
 	}()
 
@@ -217,12 +229,21 @@ func main() {
 		}
 	}()
 
-	<-ctx.Done()
+	// Espera SIGINT/SIGTERM OU falha do servidor HTTP. Em ambos os casos,
+	// fazemos shutdown ordenado abaixo (defers cuidam do resto).
+	var runErr error
+	select {
+	case <-ctx.Done():
+	case err := <-httpErr:
+		runErr = err
+	}
 	slog.Info("encerrando", slog.String("module", "main"), slog.String("event_id", "SHUTDOWN"))
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelShutdown()
 	_ = httpSrv.Shutdown(shutdownCtx)
+
+	return runErr
 }
 
 func defaultUser() string {
@@ -300,4 +321,3 @@ func lastMDBLabel(t time.Time) string {
 	}
 	return t.Format(time.RFC3339)
 }
-
