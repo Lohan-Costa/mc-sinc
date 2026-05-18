@@ -79,6 +79,20 @@ func (w *Watcher) Run(ctx context.Context) error {
 			if !isAvidMediaFile(ev.Name) {
 				continue
 			}
+			// Remove / Rename são instantâneos (sem agregação de writes
+			// como nos Creates do Avid); emitir direto, sem debounce.
+			// Cancela qualquer pending desse path — não faz sentido
+			// reagendar Write num arquivo que sumiu.
+			if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+				w.mu.Lock()
+				if t, exists := w.pending[ev.Name]; exists {
+					t.Stop()
+					delete(w.pending, ev.Name)
+				}
+				w.mu.Unlock()
+				w.Events <- Event{Path: ev.Name, Op: ev.Op, At: time.Now()}
+				continue
+			}
 			w.schedule(ev)
 		case err, ok := <-w.fsw.Errors:
 			if !ok {

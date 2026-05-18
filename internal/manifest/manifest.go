@@ -150,6 +150,35 @@ func (s *Store) UpsertObserved(path string, size int64, modifiedAt time.Time, de
 	return err
 }
 
+// Delete remove um arquivo do manifest (table `files`). Não toca
+// commit_files: arquivos já incluídos em commits sent ficam no
+// histórico mesmo após serem apagados do disco. Não falha se o path
+// não existe.
+func (s *Store) Delete(path string) error {
+	_, err := s.db.Exec(`DELETE FROM files WHERE path = ?`, path)
+	return err
+}
+
+// AllFilePaths devolve todos os paths registrados em `files`,
+// independente do status. Usado pela reconciliação no startup pra
+// detectar paths fantasmas (no manifest mas não no disco).
+func (s *Store) AllFilePaths() ([]string, error) {
+	rows, err := s.db.Query(`SELECT path FROM files`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // ByStatus lista os arquivos num determinado status.
 func (s *Store) ByStatus(st Status) ([]File, error) {
 	rows, err := s.db.Query(`

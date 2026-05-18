@@ -13,6 +13,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -21,6 +22,8 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
 
 	"github.com/Lohan-Costa/mc-sinc/internal/api"
 	"github.com/Lohan-Costa/mc-sinc/internal/automode"
@@ -273,14 +276,49 @@ func run() error {
 			slog.String("event_id", "AUTOMODE_DISABLED"))
 	}
 
-	// Drena eventos do watcher e os registra no manifest via UpsertObserved.
-	// Diferença pra Upsert genérico: preserva o hash existente quando o
-	// mtime não mudou (evita re-hash desnecessário a cada startup), e
-	// invalida o hash quando o mtime difere (.mdb/.pmr são reescritos
-	// pelo Avid — precisam ser re-hashados pra refletir o conteúdo novo).
+	// Reconciliação inicial: arquivos no manifest mas que não existem
+	// mais no disco (foram apagados enquanto mcsinc estava offline) viram
+	// fantasmas na UI. Varre o manifest e Delete os ausentes.
+	if paths, err := store.AllFilePaths(); err == nil {
+		removed := 0
+		for _, p := range paths {
+			full := filepath.Join(*root, p)
+			if _, statErr := os.Stat(full); errors.Is(statErr, fs.ErrNotExist) {
+				if err := store.Delete(p); err == nil {
+					removed++
+				}
+			}
+		}
+		if removed > 0 {
+			slog.Info("reconciliacao inicial: removidos paths fantasmas do manifest",
+				slog.String("module", "main"),
+				slog.String("event_id", "RECONCILE_REMOVED"),
+				slog.Int("count", removed))
+		}
+	}
+
+	// Drena eventos do watcher.
+	// - Create/Write: UpsertObserved (preserva hash em mtime igual,
+	//   invalida em mtime diferente).
+	// - Remove/Rename: store.Delete (path some do manifest).
 	go func() {
 		for ev := range w.Events {
 			rel, _ := filepath.Rel(*root, ev.Path)
+			if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+				if err := store.Delete(rel); err != nil {
+					slog.Warn("falha apagando arquivo do manifest",
+						slog.String("module", "watcher"),
+						slog.String("event_id", "FILE_DELETE_FAIL"),
+						slog.String("path", rel),
+						slog.String("error", err.Error()))
+					continue
+				}
+				slog.Info("arquivo removido detectado pelo watcher",
+					slog.String("module", "watcher"),
+					slog.String("event_id", "FILE_REMOVED"),
+					slog.String("path", rel))
+				continue
+			}
 			info, err := os.Stat(ev.Path)
 			if err != nil {
 				continue

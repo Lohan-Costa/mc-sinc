@@ -45,6 +45,54 @@ func TestUpsertObservedPreservaHashEmMtimeIgual(t *testing.T) {
 	}
 }
 
+func TestDeleteRemovePath(t *testing.T) {
+	store := openTestStore(t)
+	t0 := time.Unix(1700000000, 0)
+
+	if err := store.Upsert(File{
+		Path: "1/sumir.mxf", Hash: "h", Size: 1,
+		ModifiedAt: t0, Status: StatusDiscovered,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete("1/sumir.mxf"); err != nil {
+		t.Fatal(err)
+	}
+
+	files, _ := store.ByStatus(StatusDiscovered)
+	for _, f := range files {
+		if f.Path == "1/sumir.mxf" {
+			t.Errorf("Delete nao removeu o path")
+		}
+	}
+}
+
+func TestDeleteInexistenteNaoFalha(t *testing.T) {
+	store := openTestStore(t)
+	if err := store.Delete("nao/existe.mxf"); err != nil {
+		t.Errorf("Delete de path inexistente nao deveria erro; got %v", err)
+	}
+}
+
+func TestAllFilePathsListaTudo(t *testing.T) {
+	store := openTestStore(t)
+	t0 := time.Unix(1700000000, 0)
+	for _, p := range []string{"a.mxf", "b.mxf", "c.mxf"} {
+		if err := store.Upsert(File{
+			Path: p, Status: StatusDiscovered, ModifiedAt: t0,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paths, err := store.AllFilePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 3 {
+		t.Errorf("AllFilePaths=%v, esperava 3", paths)
+	}
+}
+
 func TestUpsertObservedInvalidaHashEmMtimeDiferente(t *testing.T) {
 	store := openTestStore(t)
 	t0 := time.Unix(1700000000, 0)
