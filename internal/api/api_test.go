@@ -220,19 +220,21 @@ func TestHandleStageSemPathDevolve400(t *testing.T) {
 	}
 }
 
-func TestHandleCommitInclueStagedComHash(t *testing.T) {
+func TestHandleCommitInclueTudoComHash(t *testing.T) {
 	e := newTestEnv(t)
+	// 3 arquivos: 2 com hash (discovered + staged) e 1 sem.
+	// Esperado: ambos com hash entram no commit, pasta inteira.
 	must(t, e.store.Upsert(manifest.File{
-		Path: "1/com_hash.mxf", Hash: "deadbeef", Size: 100,
+		Path: "1/clip.mxf", Hash: "deadbeef", Size: 100,
+		ModifiedAt: time.Now(), Status: manifest.StatusDiscovered,
+	}))
+	must(t, e.store.Upsert(manifest.File{
+		Path: "1/msmMMOB.mdb", Hash: "feedbeef", Size: 200,
 		ModifiedAt: time.Now(), Status: manifest.StatusStaged,
 	}))
 	must(t, e.store.Upsert(manifest.File{
-		Path: "1/sem_hash.mxf", Hash: "", Size: 200,
-		ModifiedAt: time.Now(), Status: manifest.StatusStaged,
-	}))
-	must(t, e.store.Upsert(manifest.File{
-		Path: "1/discovered.mxf", Hash: "feedbeef", Size: 300,
-		ModifiedAt: time.Now(), Status: manifest.StatusDiscovered, // não staged: ignorado
+		Path: "1/sem_hash.mxf", Hash: "", Size: 300,
+		ModifiedAt: time.Now(), Status: manifest.StatusDiscovered,
 	}))
 
 	body, _ := json.Marshal(map[string]string{"message": "smoke"})
@@ -244,19 +246,15 @@ func TestHandleCommitInclueStagedComHash(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &c); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(c.Files) != 1 || c.Files[0].Path != "1/com_hash.mxf" {
-		t.Errorf("files=%v, esperava só com_hash.mxf", c.Files)
+	if len(c.Files) != 2 {
+		t.Fatalf("files=%v, esperava 2 (clip.mxf + msmMMOB.mdb)", c.Files)
 	}
-	if c.Message != "smoke" {
-		t.Errorf("message=%q", c.Message)
+	paths := map[string]bool{}
+	for _, f := range c.Files {
+		paths[f.Path] = true
 	}
-
-	sent, err := e.store.ListCommits(manifest.DirectionSent, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sent) != 1 || sent[0].ID != c.ID {
-		t.Errorf("persisted commits=%v", sent)
+	if !paths["1/clip.mxf"] || !paths["1/msmMMOB.mdb"] {
+		t.Errorf("paths=%v, esperava clip.mxf e msmMMOB.mdb", paths)
 	}
 
 	if err := e.srv.Wait(timeoutCtx(t, 2*time.Second)); err != nil {
@@ -267,9 +265,8 @@ func TestHandleCommitInclueStagedComHash(t *testing.T) {
 	}
 }
 
-func TestHandleCommitSemStagedDevolve400(t *testing.T) {
+func TestHandleCommitSemNadaComHashDevolve400(t *testing.T) {
 	e := newTestEnv(t)
-	// manifest vazio: nada staged
 	body, _ := json.Marshal(map[string]string{"message": "vazio"})
 	rr := e.request(t, "POST", "/commit", body)
 	if rr.Code != http.StatusBadRequest {
@@ -280,11 +277,11 @@ func TestHandleCommitSemStagedDevolve400(t *testing.T) {
 	}
 }
 
-func TestHandleCommitStagedSemHashDevolve400(t *testing.T) {
+func TestHandleCommitTodosSemHashDevolve400(t *testing.T) {
 	e := newTestEnv(t)
 	must(t, e.store.Upsert(manifest.File{
 		Path: "1/a.mxf", Hash: "", Size: 100,
-		ModifiedAt: time.Now(), Status: manifest.StatusStaged,
+		ModifiedAt: time.Now(), Status: manifest.StatusDiscovered,
 	}))
 	body, _ := json.Marshal(map[string]string{"message": "msg"})
 	rr := e.request(t, "POST", "/commit", body)

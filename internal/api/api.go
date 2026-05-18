@@ -253,24 +253,28 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rejeita commit vazio explicitamente — a UI desabilita o botao
-	// Enviar quando nao ha staged, mas se alguem chamar via curl ou
-	// se houver race com o refresh, devolvemos 400 em vez de criar
-	// um commit fantasma.
-	staged, err := s.store.ByStatus(manifest.StatusStaged)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	// Rejeita commit vazio: confere se há pelo menos 1 file com hash
+	// em discovered ou staged (commit.Service.Commit considera ambos).
+	// Sem isso, criaríamos um commit fantasma de 0 arquivos.
 	hasHashable := false
-	for _, f := range staged {
-		if f.Hash != "" {
-			hasHashable = true
+	for _, st := range []manifest.Status{manifest.StatusDiscovered, manifest.StatusStaged} {
+		files, err := s.store.ByStatus(st)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		for _, f := range files {
+			if f.Hash != "" {
+				hasHashable = true
+				break
+			}
+		}
+		if hasHashable {
 			break
 		}
 	}
 	if !hasHashable {
-		http.Error(w, "nenhum arquivo staged com hash calculado", http.StatusBadRequest)
+		http.Error(w, "nenhum arquivo com hash calculado pra enviar", http.StatusBadRequest)
 		return
 	}
 

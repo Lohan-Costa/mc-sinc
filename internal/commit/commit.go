@@ -65,20 +65,29 @@ func (s *Service) Unstage(ctx context.Context, path string) error {
 	return s.store.SetStatus(path, manifest.StatusDiscovered)
 }
 
-// Commit consome todos os arquivos em status `staged` e os marca como `committed`,
-// devolvendo o Commit resultante. Não envia nada pela rede — isso é tarefa do transport.
+// Commit consome todos os arquivos com hash calculado (em status `discovered`
+// ou `staged`) e os marca como `committed`, devolvendo o Commit resultante.
+// Não envia nada pela rede — isso é tarefa do transport.
 //
-// Arquivos staged sem hash calculado são pulados: sem hash, o receiver não tem como
-// validar integridade. Eles permanecem staged e entram no próximo commit assim que
-// o hasher os processar.
+// Pasta é a unidade de envio. O Avid mantém .mdb/.pmr indexando todos os
+// .mxf da pasta numérica — enviar parcial criaria índice apontando pra
+// arquivos que não viajaram. Por isso pegamos tudo que tem hash.
+//
+// Arquivos sem hash são pulados (entram no próximo commit quando o hasher
+// processar).
 func (s *Service) Commit(ctx context.Context, message string) (*Commit, error) {
+	discovered, err := s.store.ByStatus(manifest.StatusDiscovered)
+	if err != nil {
+		return nil, err
+	}
 	staged, err := s.store.ByStatus(manifest.StatusStaged)
 	if err != nil {
 		return nil, err
 	}
+	candidates := append(discovered, staged...)
 
-	files := make([]FileSpec, 0, len(staged))
-	for _, f := range staged {
+	files := make([]FileSpec, 0, len(candidates))
+	for _, f := range candidates {
 		if f.Hash == "" {
 			continue
 		}
