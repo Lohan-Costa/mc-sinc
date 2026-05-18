@@ -71,6 +71,10 @@
       position: fixed; inset: 0; background: rgba(0,0,0,.55);
       display: flex; align-items: center; justify-content: center; z-index: 50;
     }
+    /* Garante que o atributo `hidden` sobrescreva o display: flex acima.
+       Sem isso, modal fica visível sempre que renderiza, mesmo após
+       element.hidden = true no JS. */
+    .modal[hidden] { display: none; }
     .modal-content {
       background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
       width: min(640px, 92vw); max-height: 80vh; display: flex; flex-direction: column;
@@ -816,14 +820,18 @@
 
     async function browseLoad(path) {
       const statusEl = document.getElementById('browse-status');
+      const listEl = document.getElementById('browse-list');
       statusEl.className = 'browse-status';
       statusEl.textContent = t.browseStatusListing;
+      // Feedback visual imediato na lista — antes mostrava vazio até o fetch.
+      listEl.innerHTML = `<div class="item parent">${escapeHTML(t.browseStatusListing)}</div>`;
       try {
         const url = '/fs/browse' + (path ? '?path=' + encodeURIComponent(path) : '');
         const r = await fetch(url);
         if (!r.ok) {
           statusEl.className = 'browse-status error';
           statusEl.textContent = await r.text();
+          listEl.innerHTML = '';
           return;
         }
         const data = await r.json();
@@ -831,6 +839,7 @@
       } catch (e) {
         statusEl.className = 'browse-status error';
         statusEl.textContent = e.message;
+        listEl.innerHTML = '';
       }
     }
 
