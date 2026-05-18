@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"strings"
 	"time"
 
 	"github.com/Lohan-Costa/mc-sinc/internal/manifest"
@@ -21,8 +22,14 @@ import (
 
 // FileSpec descreve um arquivo do commit com a metadata mínima
 // necessária pro receiver decidir pull e validar integridade depois.
+//
+// Path é SEMPRE em forward slash ("/"), independente do OS do sender —
+// é um path de protocolo, não de filesystem. Senders em Windows
+// normalizam via filepath.ToSlash() antes de expor o FileSpec.
+// Receivers usam path.Base/path.Dir (não path/filepath) ao consumir
+// e filepath.Join localmente pra montar caminhos de I/O.
 type FileSpec struct {
-	Path string `json:"path"` // caminho relativo à pasta MXF do sender
+	Path string `json:"path"` // caminho relativo à pasta MXF do sender, sempre forward slash
 	Hash string `json:"hash"` // xxhash64 hex, 16 chars
 	Size int64  `json:"size"` // bytes
 }
@@ -78,7 +85,11 @@ func (s *Service) Commit(ctx context.Context, message string) (*Commit, error) {
 		if err := s.store.SetStatus(f.Path, manifest.StatusCommitted); err != nil {
 			return nil, err
 		}
-		files = append(files, FileSpec{Path: f.Path, Hash: f.Hash, Size: f.Size})
+		// Path no FileSpec é sempre forward slash — ver doc de FileSpec.
+		// strings.ReplaceAll em vez de filepath.ToSlash porque este último
+		// é runtime-dependent: no Unix, "\" não é Separator e ToSlash não
+		// converteria. Aqui queremos converter incondicionalmente.
+		files = append(files, FileSpec{Path: strings.ReplaceAll(f.Path, `\`, "/"), Hash: f.Hash, Size: f.Size})
 	}
 
 	return &Commit{
