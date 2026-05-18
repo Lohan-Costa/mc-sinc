@@ -44,13 +44,18 @@ try {
     Write-Host "-> Subindo mcsinc em http://localhost:$Port (logs em $TestDir\mcsinc.log)"
     $LogPath = Join-Path $TestDir 'mcsinc.log'
     $ErrPath = Join-Path $TestDir 'mcsinc.err'
+    # Aspas literais em paths: Start-Process -ArgumentList @(...) no PS 5.1
+    # serializa o array sem re-quoting; sem aspas, paths como
+    # "C:\Users\CICLO MEDIA\..." sao cortados no espaco pelo SO.
+    $RootArg = Join-Path $TestDir 'MXF'
+    $DbArg   = Join-Path $TestDir 'manifest.db'
     $script:proc = Start-Process `
         -FilePath $BinPath `
         -ArgumentList @(
-            '--root', (Join-Path $TestDir 'MXF'),
+            '--root', "`"$RootArg`"",
             '--user', 'dev',
             '--port', "$Port",
-            '--db',   (Join-Path $TestDir 'manifest.db')
+            '--db',   "`"$DbArg`""
         ) `
         -PassThru -NoNewWindow `
         -RedirectStandardOutput $LogPath `
