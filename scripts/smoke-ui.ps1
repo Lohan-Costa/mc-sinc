@@ -98,8 +98,8 @@ try {
  [Recebidos]   deve mostrar @maria com 2 arquivos . 18.0 MB
 
  Sugestoes de teste:
-   - Digite uma mensagem e clique Enviar (vai gerar um envio com 0 arquivos
-     porque nao fizemos stage explicito - isso eh esperado por enquanto).
+   - Digite uma mensagem e clique Enviar - o commit inclui automaticamente
+     todos os arquivos pendentes com hash ja calculado (auto-stage).
    - Clique "Baixar" no card da maria - vai falhar (esperado, peer fake).
 
  Quando terminar, aperta Ctrl+C aqui pra parar tudo.
