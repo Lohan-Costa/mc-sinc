@@ -3,9 +3,41 @@ package discovery
 import (
 	"net"
 	"testing"
+	"time"
+
+	"github.com/Lohan-Costa/mc-sinc/internal/transport"
 )
 
 func ip(s string) net.IP { return net.ParseIP(s) }
+
+// Peers() deve filtrar peers stale (lastSeen > peerTTL atrás) E
+// removê-los do map — prevenir acúmulo perpétuo de entradas mortas.
+func TestPeersExpiraEDeleta(t *testing.T) {
+	d := New("alice", 7777, "v")
+	d.mu.Lock()
+	d.peers["fresh"] = &peerState{
+		peer:     transport.Peer{ID: "fresh"},
+		lastSeen: time.Now(),
+	}
+	d.peers["stale"] = &peerState{
+		peer:     transport.Peer{ID: "stale"},
+		lastSeen: time.Now().Add(-2 * peerTTL),
+	}
+	d.mu.Unlock()
+
+	got := d.Peers()
+	if len(got) != 1 || got[0].ID != "fresh" {
+		t.Errorf("Peers()=%v, esperava apenas fresh", got)
+	}
+
+	// stale deve ter sido removido do map.
+	d.mu.RLock()
+	_, stillThere := d.peers["stale"]
+	d.mu.RUnlock()
+	if stillThere {
+		t.Errorf("peer stale continua no map apos Peers()")
+	}
+}
 
 func TestPickReachableIP_PrefereMesmaSubnet(t *testing.T) {
 	peer := []net.IP{

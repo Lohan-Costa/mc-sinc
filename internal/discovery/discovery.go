@@ -37,8 +37,9 @@ const (
 	browseRound = 3 * time.Second
 
 	// peerTTL: peer sem ser visto por mais de peerTTL é considerado offline.
-	// 30s = 3x browseEvery, tolera 1 round perdida sem sumir cedo demais.
-	peerTTL = 30 * time.Second
+	// 15s = ~1.5x browseEvery — responsivo na UI sem dar falso-offline a
+	// cada round perdido.
+	peerTTL = 15 * time.Second
 )
 
 // peerState carrega o último Peer visto + quando.
@@ -295,15 +296,16 @@ func usefulInterfaces(ctx context.Context) ([]net.Interface, []net.IP) {
 }
 
 // Peers devolve um snapshot dos peers descobertos cujo lastSeen
-// é mais recente que peerTTL. Peers stale são filtrados no read e
-// continuam no map até a próxima atualização ou um GC futuro.
+// é mais recente que peerTTL. Peers stale são removidos do map no read
+// (evita acúmulo permanente de entradas mortas em sessões longas).
 func (d *Discovery) Peers() []transport.Peer {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	cutoff := time.Now().Add(-peerTTL)
 	out := make([]transport.Peer, 0, len(d.peers))
-	for _, st := range d.peers {
+	for id, st := range d.peers {
 		if st.lastSeen.Before(cutoff) {
+			delete(d.peers, id)
 			continue
 		}
 		out = append(out, st.peer)
