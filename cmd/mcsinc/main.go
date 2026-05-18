@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/Lohan-Costa/mc-sinc/internal/api"
+	"github.com/Lohan-Costa/mc-sinc/internal/automode"
 	"github.com/Lohan-Costa/mc-sinc/internal/avid"
 	"github.com/Lohan-Costa/mc-sinc/internal/commit"
 	"github.com/Lohan-Costa/mc-sinc/internal/discovery"
@@ -57,6 +58,8 @@ func run() error {
 			"verbosidade dos logs: trace, debug, info, warn, error")
 		logDir = flag.String("log-dir", defaultLogDir(),
 			"pasta onde app.log e app.jsonl moram")
+		autoPull = flag.Bool("auto-pull", true,
+			"baixar commits recebidos automaticamente quando Avid estiver idle (fechado ≥5min)")
 	)
 	flag.Parse()
 
@@ -208,6 +211,37 @@ func run() error {
 				slog.String("error", err.Error()))
 		}
 	}()
+
+	// Auto-pull: baixa commits recebidos quando Avid está idle. Pode ser
+	// desativado com --auto-pull=false (útil em apresentação ou debug).
+	if *autoPull {
+		go func() {
+			cfg := automode.Config{
+				Detect: func() (avid.Snapshot, error) {
+					return avid.Detect(avid.Config{
+						Root:        *root,
+						ProcessName: *avidProcess,
+					})
+				},
+				Store:     store,
+				Transport: tport,
+				Interval:  30 * time.Second,
+			}
+			if err := automode.Run(ctx, cfg); err != nil && !errors.Is(err, context.Canceled) {
+				slog.Warn("automode encerrou com erro",
+					slog.String("module", "automode"),
+					slog.String("event_id", "AUTOMODE_FAIL"),
+					slog.String("error", err.Error()))
+			}
+		}()
+		slog.Info("auto-pull ativo",
+			slog.String("module", "main"),
+			slog.String("event_id", "AUTOMODE_ENABLED"))
+	} else {
+		slog.Info("auto-pull desativado por flag",
+			slog.String("module", "main"),
+			slog.String("event_id", "AUTOMODE_DISABLED"))
+	}
 
 	// Drena eventos do watcher e os registra como `discovered` no manifest.
 	go func() {
