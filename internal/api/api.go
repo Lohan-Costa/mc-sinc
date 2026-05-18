@@ -51,8 +51,9 @@ type Server struct {
 	commits     *commit.Service
 	discovery   *discovery.Discovery
 	transport   transport.Transport
-	web         fs.FS
-	avidProcess string
+	web              fs.FS
+	avidProcess      string
+	avidRecentWindow time.Duration
 
 	// lifecycle é o ctx que os handlers usam pra spawnar goroutines de
 	// background (fan-out de Send, Pull). É cancelado pelo caller no
@@ -72,8 +73,9 @@ type Config struct {
 	Commits     *commit.Service
 	Discovery   *discovery.Discovery
 	Transport   transport.Transport
-	Web         fs.FS // sistema de arquivos com a UI (`web/`)
-	AvidProcess string // nome do processo do Avid pra detecção (ex: "Avid Media Composer")
+	Web              fs.FS         // sistema de arquivos com a UI (`web/`)
+	AvidProcess      string        // nome do processo do Avid pra detecção (ex: "Avid Media Composer")
+	AvidRecentWindow time.Duration // threshold pra Avid virar idle; se zero, usa default 5min
 
 	// ConfigPath: arquivo de config persistente (ex: ~/.mcsinc/config.json).
 	// Se vazio, GET/POST /config respondem 503 (não configurado).
@@ -100,9 +102,10 @@ func New(cfg Config) *Server {
 		commits:     cfg.Commits,
 		discovery:   cfg.Discovery,
 		transport:   cfg.Transport,
-		web:         cfg.Web,
-		avidProcess: cfg.AvidProcess,
-		lifecycle:   lifecycle,
+		web:              cfg.Web,
+		avidProcess:      cfg.AvidProcess,
+		avidRecentWindow: cfg.AvidRecentWindow,
+		lifecycle:        lifecycle,
 	}
 }
 
@@ -176,8 +179,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// (ex: --root apontado pra pasta vazia) — o Snapshot ainda é parcial e
 	// útil; logamos pra debug mas não falhamos a request.
 	snap, err := avid.Detect(avid.Config{
-		Root:        s.root,
-		ProcessName: s.avidProcess,
+		Root:         s.root,
+		ProcessName:  s.avidProcess,
+		RecentWindow: s.avidRecentWindow,
 	})
 	// Vários erros de avid.Detect são "ruído normal" e não precisam aparecer
 	// no log — basta snap.State na wire.

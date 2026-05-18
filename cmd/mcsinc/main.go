@@ -66,6 +66,8 @@ func run() error {
 			"baixar commits recebidos automaticamente quando Avid estiver idle (fechado ≥5min)")
 		autoCommit = flag.Bool("auto-commit", true,
 			"commitar e enviar mudancas automaticamente quando Avid estiver idle")
+		avidRecentWindow = flag.Duration("avid-recent-window", avid.DefaultRecentWindow,
+			"tempo que o .mdb precisa ficar parado pra Avid virar 'idle' (default 5m). Reduzir acelera auto-mode mas aumenta risco de pegar Avid no meio de uma operação.")
 	)
 	flag.Parse()
 
@@ -172,17 +174,18 @@ func run() error {
 	defer cancel()
 
 	srv := api.New(api.Config{
-		User:        *user,
-		Root:        *root,
-		Version:     version,
-		Store:       store,
-		Commits:     commits,
-		Discovery:   disc,
-		Transport:   tport,
-		Web:         webRoot,
-		AvidProcess: *avidProcess,
-		ConfigPath:  defaultConfigPath(),
-		Lifecycle:   ctx, // cancela fan-outs de background no shutdown
+		User:             *user,
+		Root:             *root,
+		Version:          version,
+		Store:            store,
+		Commits:          commits,
+		Discovery:        disc,
+		Transport:        tport,
+		Web:              webRoot,
+		AvidProcess:      *avidProcess,
+		AvidRecentWindow: *avidRecentWindow,
+		ConfigPath:       defaultConfigPath(),
+		Lifecycle:        ctx, // cancela fan-outs de background no shutdown
 	})
 
 	httpSrv := &http.Server{
@@ -247,8 +250,9 @@ func run() error {
 			cfg := automode.Config{
 				Detect: func() (avid.Snapshot, error) {
 					return avid.Detect(avid.Config{
-						Root:        *root,
-						ProcessName: *avidProcess,
+						Root:         *root,
+						ProcessName:  *avidProcess,
+						RecentWindow: *avidRecentWindow,
 					})
 				},
 				Store:      store,
