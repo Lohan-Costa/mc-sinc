@@ -40,13 +40,34 @@ type PeerSource interface {
 
 // Transport implementa transport.Transport sobre HTTP + mDNS na LAN.
 type Transport struct {
-	user    string
-	port    int
-	root    string
-	store   *manifest.Store
-	discov  PeerSource
+	user   string
+	port   int
+	store  *manifest.Store
+	discov PeerSource
+
+	// root é a raiz MXF; é mutável em runtime (Lohan pode trocar a
+	// pasta pela UI). Sempre acessado via getRoot / SetRoot pra
+	// coordenar com handlers concorrentes.
+	mu   sync.RWMutex
+	root string
 
 	httpClient *http.Client
+}
+
+// getRoot lê t.root sob mutex.
+func (t *Transport) getRoot() string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.root
+}
+
+// SetRoot atualiza a raiz MXF em runtime. Chamadores em curso (Send,
+// Pull, handleFile) que já capturaram o root antigo terminam com ele;
+// chamadas novas pegam o root novo.
+func (t *Transport) SetRoot(newRoot string) {
+	t.mu.Lock()
+	t.root = newRoot
+	t.mu.Unlock()
 }
 
 // DefaultPullHeaderTimeout: quanto o cliente espera por response headers
@@ -66,10 +87,9 @@ func New(user string, port int, root string, store *manifest.Store, disc PeerSou
 // útil em testes que precisam de timeout curto pra exercitar peer offline
 // sem esperar 30s.
 func NewWithHeaderTimeout(user string, port int, root string, store *manifest.Store, disc PeerSource, headerTimeout time.Duration) *Transport {
-	return &Transport{
+	t := &Transport{
 		user:   user,
 		port:   port,
-		root:   root,
 		store:  store,
 		discov: disc,
 		httpClient: &http.Client{
@@ -79,6 +99,8 @@ func NewWithHeaderTimeout(user string, port int, root string, store *manifest.St
 			},
 		},
 	}
+	t.root = root
+	return t
 }
 
 // Send anuncia um commit a todos os peers conhecidos. Fan-out em goroutines;
@@ -156,7 +178,7 @@ func (t *Transport) Pull(ctx context.Context, commitID string) error {
 		return fmt.Errorf("status pulling: %w", err)
 	}
 
-	destDir := filepath.Join(t.root, "1-"+c.Author)
+	destDir := filepath.Join(t.getRoot(), "1-"+c.Author)
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", destDir, err)
 	}

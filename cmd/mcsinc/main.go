@@ -20,6 +20,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -149,19 +150,6 @@ func run() error {
 
 	disc := discovery.New(*user, *port, version)
 
-	// O watcher acompanha a subpasta do usuário corrente dentro de MXF.
-	// Convencão: cada editor edita em MXF/<numero> — começamos por MXF/1
-	// e expandimos isso quando suportarmos múltiplas pastas locais.
-	localFolder := filepath.Join(*root, "1")
-
-	w, err := watcher.New(localFolder)
-	if err != nil {
-		slog.Error("falha criando watcher", slog.String("module", "main"), slog.String("error", err.Error()))
-		return err
-	}
-
-	h := hasher.New(store, *root)
-
 	tport := lan.New(*user, *port, *root, store, disc)
 
 	webRoot, err := web.FS()
@@ -172,6 +160,33 @@ func run() error {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	// Workers root-dependentes (watcher, hasher, drainer, reconciliação)
+	// vivem num escopo reciclável — quando o usuário troca a pasta pela UI,
+	// paramos o escopo antigo e iniciamos um novo apontando pro novo root.
+	// rootMu protege a troca; rootWk é o handle atual.
+	var rootMu sync.Mutex
+	rootWk := startRootWorkers(ctx, *root, store)
+	defer func() { rootWk.stop() }()
+
+	// reconfigure é a callback que api.Server chama quando POST
+	// /config/select-avid valida + persiste novo root. Troca atomic:
+	// para escopo antigo, atualiza transport.SetRoot, atualiza *root
+	// (pra closure do automode Detect ver), inicia novo escopo.
+	reconfigure := func(newRoot string) error {
+		rootMu.Lock()
+		defer rootMu.Unlock()
+		slog.Info("reconfigurando root em runtime",
+			slog.String("module", "main"),
+			slog.String("event_id", "ROOT_RECONFIGURE"),
+			slog.String("old", *root),
+			slog.String("new", newRoot))
+		rootWk.stop()
+		tport.SetRoot(newRoot)
+		*root = newRoot
+		rootWk = startRootWorkers(ctx, newRoot, store)
+		return nil
+	}
 
 	srv := api.New(api.Config{
 		User:             *user,
@@ -186,6 +201,7 @@ func run() error {
 		AvidRecentWindow: *avidRecentWindow,
 		ConfigPath:       defaultConfigPath(),
 		Lifecycle:        ctx, // cancela fan-outs de background no shutdown
+		Reconfigure:      reconfigure,
 	})
 
 	httpSrv := &http.Server{
@@ -219,24 +235,6 @@ func run() error {
 			slog.Warn("discovery encerrou com erro",
 				slog.String("module", "discovery"),
 				slog.String("event_id", "DISCOVERY_FAIL"),
-				slog.String("error", err.Error()))
-		}
-	}()
-
-	go func() {
-		if err := w.Run(ctx); err != nil {
-			slog.Warn("watcher encerrou com erro",
-				slog.String("module", "watcher"),
-				slog.String("event_id", "WATCHER_FAIL"),
-				slog.String("error", err.Error()))
-		}
-	}()
-
-	go func() {
-		if err := h.Run(ctx); err != nil {
-			slog.Warn("hasher encerrou com erro",
-				slog.String("module", "hasher"),
-				slog.String("event_id", "HASHER_FAIL"),
 				slog.String("error", err.Error()))
 		}
 	}()
@@ -280,60 +278,8 @@ func run() error {
 			slog.String("event_id", "AUTOMODE_DISABLED"))
 	}
 
-	// Reconciliação inicial: arquivos no manifest mas que não existem
-	// mais no disco (foram apagados enquanto mcsinc estava offline) viram
-	// fantasmas na UI. Varre o manifest e Delete os ausentes.
-	if paths, err := store.AllFilePaths(); err == nil {
-		removed := 0
-		for _, p := range paths {
-			full := filepath.Join(*root, p)
-			if _, statErr := os.Stat(full); errors.Is(statErr, fs.ErrNotExist) {
-				if err := store.Delete(p); err == nil {
-					removed++
-				}
-			}
-		}
-		if removed > 0 {
-			slog.Info("reconciliacao inicial: removidos paths fantasmas do manifest",
-				slog.String("module", "main"),
-				slog.String("event_id", "RECONCILE_REMOVED"),
-				slog.Int("count", removed))
-		}
-	}
-
-	// Drena eventos do watcher.
-	// - Create/Write: UpsertObserved (preserva hash em mtime igual,
-	//   invalida em mtime diferente).
-	// - Remove/Rename: store.Delete (path some do manifest).
-	go func() {
-		for ev := range w.Events {
-			rel, _ := filepath.Rel(*root, ev.Path)
-			if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
-				if err := store.Delete(rel); err != nil {
-					slog.Warn("falha apagando arquivo do manifest",
-						slog.String("module", "watcher"),
-						slog.String("event_id", "FILE_DELETE_FAIL"),
-						slog.String("path", rel),
-						slog.String("error", err.Error()))
-					continue
-				}
-				slog.Info("arquivo removido detectado pelo watcher",
-					slog.String("module", "watcher"),
-					slog.String("event_id", "FILE_REMOVED"),
-					slog.String("path", rel))
-				continue
-			}
-			info, err := os.Stat(ev.Path)
-			if err != nil {
-				continue
-			}
-			_ = store.UpsertObserved(rel, info.Size(), info.ModTime(), manifest.StatusDiscovered)
-			slog.Info("arquivo descoberto pelo watcher",
-				slog.String("module", "watcher"),
-				slog.String("event_id", "FILE_DISCOVERED"),
-				slog.String("path", rel))
-		}
-	}()
+	// (watcher / hasher / drainer / reconciliação inicial vivem todos em
+	// startRootWorkers, criado acima e gerenciado por reconfigure.)
 
 	// Espera SIGINT/SIGTERM OU falha do servidor HTTP. Em ambos os casos,
 	// fazemos shutdown ordenado abaixo (defers cuidam do resto).
@@ -360,6 +306,145 @@ func run() error {
 	}
 
 	return runErr
+}
+
+// rootWorkers agrupa o ciclo de vida dos componentes root-dependentes
+// (watcher, hasher, drainer, reconciliação). Tudo isso precisa ser
+// derrubado e reiniciado quando o usuário troca a pasta MXF pela UI.
+type rootWorkers struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// stop encerra o escopo e bloqueia até as goroutines drenarem.
+func (rw *rootWorkers) stop() {
+	if rw == nil {
+		return
+	}
+	rw.cancel()
+	<-rw.done
+}
+
+// startRootWorkers sobe watcher + hasher + drainer + reconciliação
+// inicial pra um root específico. Tudo dura até o ctx interno ser
+// cancelado (rw.stop). Devolve handle pra parar o escopo.
+//
+// Nota: o ctx parent recebido é o do mcsinc inteiro (SIGTERM-aware).
+// O escopo cria um child ctx — cancelar o child afeta só este escopo;
+// cancelar o parent afeta tudo.
+func startRootWorkers(parent context.Context, root string, store *manifest.Store) *rootWorkers {
+	ctx, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
+
+	localFolder := filepath.Join(root, "1")
+	w, werr := watcher.New(localFolder)
+	if werr != nil {
+		slog.Warn("falha criando watcher — escopo do root nao subiu",
+			slog.String("module", "main"),
+			slog.String("event_id", "WATCHER_NEW_FAIL"),
+			slog.String("root", root),
+			slog.String("error", werr.Error()))
+		cancel()
+		close(done)
+		return &rootWorkers{cancel: cancel, done: done}
+	}
+	h := hasher.New(store, root)
+
+	go func() {
+		defer close(done)
+		var wg sync.WaitGroup
+
+		// Reconciliação inicial: paths fantasmas no manifest viram delete.
+		if paths, err := store.AllFilePaths(); err == nil {
+			removed := 0
+			for _, p := range paths {
+				full := filepath.Join(root, p)
+				if _, statErr := os.Stat(full); errors.Is(statErr, fs.ErrNotExist) {
+					if err := store.Delete(p); err == nil {
+						removed++
+					}
+				}
+			}
+			if removed > 0 {
+				slog.Info("reconciliacao inicial: removidos paths fantasmas do manifest",
+					slog.String("module", "main"),
+					slog.String("event_id", "RECONCILE_REMOVED"),
+					slog.Int("count", removed))
+			}
+		}
+
+		// Watcher.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := w.Run(ctx); err != nil {
+				slog.Warn("watcher encerrou com erro",
+					slog.String("module", "watcher"),
+					slog.String("event_id", "WATCHER_FAIL"),
+					slog.String("error", err.Error()))
+			}
+		}()
+
+		// Hasher.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := h.Run(ctx); err != nil {
+				slog.Warn("hasher encerrou com erro",
+					slog.String("module", "hasher"),
+					slog.String("event_id", "HASHER_FAIL"),
+					slog.String("error", err.Error()))
+			}
+		}()
+
+		// Drainer dos eventos do watcher → manifest. Respeita ctx pra
+		// permitir reconfig em runtime (w.Events nunca é fechado pelo
+		// watcher; sem o ctx.Done aqui, o range bloquearia pra sempre
+		// e rootWorkers.stop ficaria pendurado).
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case ev, ok := <-w.Events:
+					if !ok {
+						return
+					}
+					rel, _ := filepath.Rel(root, ev.Path)
+					if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+						if err := store.Delete(rel); err != nil {
+							slog.Warn("falha apagando arquivo do manifest",
+								slog.String("module", "watcher"),
+								slog.String("event_id", "FILE_DELETE_FAIL"),
+								slog.String("path", rel),
+								slog.String("error", err.Error()))
+							continue
+						}
+						slog.Info("arquivo removido detectado pelo watcher",
+							slog.String("module", "watcher"),
+							slog.String("event_id", "FILE_REMOVED"),
+							slog.String("path", rel))
+						continue
+					}
+					info, err := os.Stat(ev.Path)
+					if err != nil {
+						continue
+					}
+					_ = store.UpsertObserved(rel, info.Size(), info.ModTime(), manifest.StatusDiscovered)
+					slog.Info("arquivo descoberto pelo watcher",
+						slog.String("module", "watcher"),
+						slog.String("event_id", "FILE_DISCOVERED"),
+						slog.String("path", rel))
+				}
+			}
+		}()
+
+		wg.Wait()
+	}()
+
+	return &rootWorkers{cancel: cancel, done: done}
 }
 
 func defaultUser() string {

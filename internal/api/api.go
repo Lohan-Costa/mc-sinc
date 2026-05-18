@@ -63,6 +63,13 @@ type Server struct {
 	// de fechar o store.
 	lifecycle context.Context
 	wg        sync.WaitGroup
+
+	// rootMu protege s.root e s.reconfigure. Quando o usuário troca a
+	// pasta pela UI, /config/select-avid chama reconfigure (callback
+	// do main que para workers antigos + inicia novos) e depois
+	// atualiza s.root atomicamente.
+	rootMu      sync.RWMutex
+	reconfigure func(newRoot string) error
 }
 
 // Config agrupa as dependências necessárias para construir o Server.
@@ -81,6 +88,12 @@ type Config struct {
 	// ConfigPath: arquivo de config persistente (ex: ~/.mcsinc/config.json).
 	// Se vazio, GET/POST /config respondem 503 (não configurado).
 	ConfigPath string
+
+	// Reconfigure: callback chamado quando o usuário escolhe nova pasta
+	// raiz pela UI. main.go usa pra parar watcher/hasher antigos +
+	// reiniciar com o novo root + chamar Transport.SetRoot. Se nil,
+	// /config/select-avid só persiste o config.json e exige restart.
+	Reconfigure func(newRoot string) error
 
 	// Lifecycle: ctx que controla as goroutines de fan-out. Quando
 	// cancelado, Send/Pull em curso abortam. Opcional — default é
@@ -107,7 +120,24 @@ func New(cfg Config) *Server {
 		avidProcess:      cfg.AvidProcess,
 		avidRecentWindow: cfg.AvidRecentWindow,
 		lifecycle:        lifecycle,
+		reconfigure:      cfg.Reconfigure,
 	}
+}
+
+// CurrentRoot devolve o root em uso (atomic com SetRoot pra coordenar
+// com reconfig em runtime).
+func (s *Server) CurrentRoot() string {
+	s.rootMu.RLock()
+	defer s.rootMu.RUnlock()
+	return s.root
+}
+
+// SetRoot atualiza s.root. Chamado pelo main.go (ou via Reconfigure
+// callback) quando o usuário troca a pasta pela UI.
+func (s *Server) SetRoot(newRoot string) {
+	s.rootMu.Lock()
+	s.root = newRoot
+	s.rootMu.Unlock()
 }
 
 // Wait bloqueia até todas as goroutines de fan-out terminarem ou o ctx
@@ -182,7 +212,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// (ex: --root apontado pra pasta vazia) — o Snapshot ainda é parcial e
 	// útil; logamos pra debug mas não falhamos a request.
 	snap, err := avid.Detect(avid.Config{
-		Root:         s.root,
+		Root:         s.CurrentRoot(),
 		ProcessName:  s.avidProcess,
 		RecentWindow: s.avidRecentWindow,
 	})
@@ -201,7 +231,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, statusResponse{
 		User:    s.user,
-		Root:    s.root,
+		Root:    s.CurrentRoot(),
 		Version: s.version,
 		Peers:   peerIDs,
 		Avid:    snap,
@@ -541,14 +571,38 @@ func (s *Server) handleSelectAvid(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Se main.go forneceu callback de reconfig, aplica em runtime
+	// (sem precisar reiniciar). Caso contrário, persiste e devolve
+	// mensagem de restart como antes.
+	applied := false
+	if s.reconfigure != nil {
+		if err := s.reconfigure(mxfRoot); err != nil {
+			slog.WarnContext(r.Context(), "reconfigure em runtime falhou — config salvo mas exige restart",
+				slog.String("module", logModule),
+				slog.String("event_id", "RECONFIGURE_FAIL"),
+				slog.String("error", err.Error()))
+		} else {
+			s.SetRoot(mxfRoot)
+			applied = true
+		}
+	}
+
 	slog.InfoContext(r.Context(), "Avid MediaFiles selecionado pela UI",
 		slog.String("module", logModule),
 		slog.String("event_id", "SELECT_AVID_OK"),
 		slog.String("avid_media_files", req.AvidMediaFilesPath),
-		slog.String("mxf_root", mxfRoot))
+		slog.String("mxf_root", mxfRoot),
+		slog.Bool("applied_runtime", applied))
+
+	msg := "Pasta Avid MediaFiles salva. Reinicie o MC Sinc para aplicar."
+	if applied {
+		msg = "Pasta Avid MediaFiles aplicada — pronto pra usar."
+	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"root":    mxfRoot,
-		"message": "Pasta Avid MediaFiles salva. Reinicie o MC Sinc para aplicar.",
+		"message": msg,
+		"applied": map[bool]string{true: "true", false: "false"}[applied],
 	})
 }
 

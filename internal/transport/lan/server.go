@@ -197,7 +197,7 @@ func (t *Transport) handleFile(w http.ResponseWriter, r *http.Request) {
 
 	// filepath.Join no Windows aceita /, mas explicitar FromSlash é menos
 	// frágil que confiar em comportamento implícito do stdlib.
-	full := filepath.Join(t.root, filepath.FromSlash(relNorm))
+	full := filepath.Join(t.getRoot(), filepath.FromSlash(relNorm))
 	f, err := os.Open(full)
 	if err != nil {
 		slog.ErrorContext(ctx, "falha abrindo arquivo pra servir",
