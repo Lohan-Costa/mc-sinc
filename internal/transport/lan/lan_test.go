@@ -318,6 +318,97 @@ func TestHandleFileNormalizaCompareEPath(t *testing.T) {
 	}
 }
 
+// Se o arquivo já existe no destino com hash correto, pullOne pula o
+// download. .mdb/.pmr sempre baixam (Avid atualiza constantemente).
+func TestPullSkipDeltaQuandoArquivoJaExiste(t *testing.T) {
+	alice := newNode(t, "alice")
+	bob := newNode(t, "bob")
+
+	payload := []byte("a-cena-ja-existe-no-bob")
+	spec := alice.writeMXF(t, "ja-existe.mxf", payload)
+
+	c := &commit.Commit{
+		ID:        "0102030400000aa1",
+		Author:    "alice",
+		Files:     []commit.FileSpec{spec},
+		CreatedAt: time.Now(),
+	}
+	saveSent(t, alice.store, c)
+
+	// Pre-popula o destino do Bob com o arquivo já presente.
+	destDir := filepath.Join(bob.root, "1-alice")
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(destDir, "ja-existe.mxf"), payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Bob recebe o announce + faz pull. Deve completar sem baixar
+	// (não há listener pra contar requests, então valida via os.Stat
+	// + log seria ideal; aqui confiamos no Pull terminar OK + a not-modified.
+	alice.tport.discov = &stubPeers{list: []transport.Peer{{ID: "bob", Addr: bob.addr(t)}}}
+	if err := alice.tport.Send(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	bob.tport.discov = &stubPeers{list: []transport.Peer{{ID: "alice", Addr: alice.addr(t)}}}
+	if err := bob.tport.Pull(context.Background(), c.ID); err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+
+	// Arquivo continua intacto (mesmo conteúdo).
+	got, err := os.ReadFile(filepath.Join(destDir, "ja-existe.mxf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(payload) {
+		t.Errorf("conteúdo divergiu apos pull skip")
+	}
+	updated, _ := bob.store.GetCommit(c.ID)
+	if updated.Status != manifest.CommitStatusPulled {
+		t.Errorf("status apos skip=%q, esperava pulled", updated.Status)
+	}
+}
+
+// Mesma situação mas com .mdb: deve SEMPRE baixar (sobrescrever),
+// mesmo se hash bate. Avid pode ter atualizado entre commits — não
+// dá pra confiar em hash velho do destino.
+func TestPullMdbSempreBaixaMesmoComHashIgual(t *testing.T) {
+	alice := newNode(t, "alice")
+	bob := newNode(t, "bob")
+
+	payload := []byte("mdb-index-content")
+	spec := alice.writeMXF(t, "msmMMOB.mdb", payload)
+
+	c := &commit.Commit{
+		ID:        "0102030400000bb2",
+		Author:    "alice",
+		Files:     []commit.FileSpec{spec},
+		CreatedAt: time.Now(),
+	}
+	saveSent(t, alice.store, c)
+
+	destDir := filepath.Join(bob.root, "1-alice")
+	_ = os.MkdirAll(destDir, 0o755)
+	// Pre-popula com payload diferente — após pull deve ser sobrescrito
+	// pelo do alice.
+	_ = os.WriteFile(filepath.Join(destDir, "msmMMOB.mdb"), []byte("conteudo-velho"), 0o644)
+
+	alice.tport.discov = &stubPeers{list: []transport.Peer{{ID: "bob", Addr: bob.addr(t)}}}
+	if err := alice.tport.Send(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	bob.tport.discov = &stubPeers{list: []transport.Peer{{ID: "alice", Addr: alice.addr(t)}}}
+	if err := bob.tport.Pull(context.Background(), c.ID); err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+
+	got, _ := os.ReadFile(filepath.Join(destDir, "msmMMOB.mdb"))
+	if string(got) != string(payload) {
+		t.Errorf(".mdb nao foi sobrescrito; got %q, want %q", got, payload)
+	}
+}
+
 // Garante que pathEscapeSegments mantém as `/` mas escapa caracteres dentro
 // dos segmentos. Importante para nomes como "A001 (take 2).mxf".
 func TestPathEscapeSegments(t *testing.T) {

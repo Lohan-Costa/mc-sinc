@@ -187,12 +187,6 @@ func (t *Transport) Pull(ctx context.Context, commitID string) error {
 
 // pullOne baixa um único arquivo, valida hash, e grava em destDir/<basename>.
 func (t *Transport) pullOne(ctx context.Context, peerAddr, commitID string, f manifest.CommitFile, destDir string) error {
-	stream, err := t.fetch(ctx, peerAddr, commitID, f.Path)
-	if err != nil {
-		return err
-	}
-	defer stream.Close()
-
 	// path.Base (não path/filepath.Base): f.Path é forward-slash de
 	// protocolo. filepath.Base no Unix não reconheceria backslash, mas
 	// FileSpec é normalizado no sender; usar path.Base remove a chance
@@ -200,6 +194,31 @@ func (t *Transport) pullOne(ctx context.Context, peerAddr, commitID string, f ma
 	filename := path.Base(f.Path)
 	finalPath := filepath.Join(destDir, filename)
 	tmpPath := finalPath + ".part"
+
+	// Delta sync: se já temos o arquivo no destino com hash correto,
+	// pula o download. .mdb/.pmr sempre baixam (Avid os atualiza
+	// constantemente — sender tem o índice fresco que precisamos).
+	if !isAvidIndex(filename) {
+		if existing, err := os.Open(finalPath); err == nil {
+			eh := xxhash.New()
+			_, copyErr := io.Copy(eh, existing)
+			_ = existing.Close()
+			if copyErr == nil && fmt.Sprintf("%016x", eh.Sum64()) == f.Hash {
+				slog.InfoContext(ctx, "pull skip — arquivo ja existe com hash correto",
+					slog.String("module", logModule),
+					slog.String("event_id", "PULL_SKIP_DELTA"),
+					slog.String("path", f.Path),
+					slog.String("hash", f.Hash))
+				return nil
+			}
+		}
+	}
+
+	stream, err := t.fetch(ctx, peerAddr, commitID, f.Path)
+	if err != nil {
+		return err
+	}
+	defer stream.Close()
 
 	out, err := os.Create(tmpPath)
 	if err != nil {
@@ -286,6 +305,14 @@ func peerHostPort(remoteAddr string, fallbackPort int, author string, disc PeerS
 		host = remoteAddr[:i]
 	}
 	return fmt.Sprintf("%s:%d", host, fallbackPort)
+}
+
+// isAvidIndex devolve true se o filename é um dos arquivos de índice
+// do Avid (.mdb / .pmr). Esses sempre são baixados — o Avid pode ter
+// atualizado entre commits, então confiar no hash local seria errado.
+func isAvidIndex(filename string) bool {
+	lower := strings.ToLower(filename)
+	return lower == "msmmmob.mdb" || lower == "msmfmid.pmr"
 }
 
 // compile-time check de que satisfazemos a interface.
