@@ -110,24 +110,51 @@ func (t *Transport) handleAnnounce(w http.ResponseWriter, r *http.Request) {
 // está fazendo pull. Só serve arquivos que pertencem a um commit nosso
 // (direction=sent) — bloqueia leitura arbitrária do disco.
 func (t *Transport) handleFile(w http.ResponseWriter, r *http.Request) {
+	// Correlaciona com o op_id do peer que solicitou — mesmo pattern do
+	// handleAnnounce.
+	ctx := r.Context()
+	if op := r.Header.Get(opHeader); op != "" {
+		ctx = logpkg.WithOp(ctx, op)
+	}
+
 	id := chi.URLParam(r, "id")
 	rel := chi.URLParam(r, "*")
 	if id == "" || rel == "" {
+		slog.WarnContext(ctx, "/peer/files chamado sem id/path",
+			slog.String("module", logModule),
+			slog.String("event_id", "FILE_REQUEST_INVALID"),
+			slog.String("from", r.RemoteAddr))
 		http.Error(w, "missing id or path", http.StatusBadRequest)
 		return
 	}
 
 	c, err := t.store.GetCommit(id)
 	if errors.Is(err, manifest.ErrCommitNotFound) {
+		slog.WarnContext(ctx, "/peer/files com commit_id desconhecido",
+			slog.String("module", logModule),
+			slog.String("event_id", "FILE_COMMIT_NOT_FOUND"),
+			slog.String("commit_id", id),
+			slog.String("from", r.RemoteAddr))
 		http.NotFound(w, r)
 		return
 	}
 	if err != nil {
+		slog.ErrorContext(ctx, "falha consultando commit pra servir arquivo",
+			slog.String("module", logModule),
+			slog.String("event_id", "FILE_LOOKUP_FAIL"),
+			slog.String("commit_id", id),
+			slog.String("error", err.Error()))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if c.Direction != manifest.DirectionSent {
 		// Não servimos arquivos de commits que recebemos — só os nossos.
+		// Pode ser peer mal configurado ou tentativa de leitura indevida.
+		slog.WarnContext(ctx, "/peer/files pediu commit que nao e nosso (direction!=sent)",
+			slog.String("module", logModule),
+			slog.String("event_id", "FILE_NOT_OUR_COMMIT"),
+			slog.String("commit_id", id),
+			slog.String("from", r.RemoteAddr))
 		http.NotFound(w, r)
 		return
 	}
@@ -140,6 +167,13 @@ func (t *Transport) handleFile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !allowed {
+		// Path fora da lista do commit — bloqueio de leitura arbitrária.
+		slog.WarnContext(ctx, "/peer/files pediu path fora do manifesto do commit",
+			slog.String("module", logModule),
+			slog.String("event_id", "FILE_NOT_ALLOWED"),
+			slog.String("commit_id", id),
+			slog.String("path", rel),
+			slog.String("from", r.RemoteAddr))
 		http.NotFound(w, r)
 		return
 	}
@@ -147,6 +181,12 @@ func (t *Transport) handleFile(w http.ResponseWriter, r *http.Request) {
 	full := filepath.Join(t.root, rel)
 	f, err := os.Open(full)
 	if err != nil {
+		slog.ErrorContext(ctx, "falha abrindo arquivo pra servir",
+			slog.String("module", logModule),
+			slog.String("event_id", "FILE_OPEN_FAIL"),
+			slog.String("commit_id", id),
+			slog.String("path", rel),
+			slog.String("error", err.Error()))
 		http.Error(w, "open: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -157,6 +197,12 @@ func (t *Transport) handleFile(w http.ResponseWriter, r *http.Request) {
 	if info != nil {
 		w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
 	}
+	slog.InfoContext(ctx, "servindo arquivo pro peer",
+		slog.String("module", logModule),
+		slog.String("event_id", "FILE_SERVED"),
+		slog.String("commit_id", id),
+		slog.String("path", rel),
+		slog.String("from", r.RemoteAddr))
 	http.ServeContent(w, r, filepath.Base(rel), info.ModTime(), f)
 }
 
