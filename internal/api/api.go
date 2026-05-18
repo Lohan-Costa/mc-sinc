@@ -34,6 +34,7 @@ import (
 	"github.com/Lohan-Costa/mc-sinc/internal/commit"
 	"github.com/Lohan-Costa/mc-sinc/internal/config"
 	"github.com/Lohan-Costa/mc-sinc/internal/discovery"
+	"github.com/Lohan-Costa/mc-sinc/internal/fsbrowse"
 	logpkg "github.com/Lohan-Costa/mc-sinc/internal/logging"
 	"github.com/Lohan-Costa/mc-sinc/internal/manifest"
 	"github.com/Lohan-Costa/mc-sinc/internal/transport"
@@ -148,6 +149,8 @@ func (s *Server) Handler() http.Handler {
 
 	r.Get("/config", s.handleGetConfig)
 	r.Post("/config", s.handlePostConfig)
+	r.Get("/fs/browse", s.handleFsBrowse)
+	r.Post("/config/select-avid", s.handleSelectAvid)
 
 	if s.transport != nil {
 		r.Mount("/peer", s.transport.Routes())
@@ -485,6 +488,67 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 		slog.String("new_root", req.Root))
 	writeJSON(w, http.StatusOK, map[string]string{
 		"message": "Config salvo. Reinicie o MC Sinc para aplicar.",
+	})
+}
+
+// handleFsBrowse lista subdiretórios de um path (query ?path=...).
+// Sem path → lista volumes/drives do sistema. Usado pelo modal de
+// "Editar pasta raiz" na UI pra navegar sem file picker nativo.
+func (s *Server) handleFsBrowse(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	res, err := fsbrowse.List(path)
+	if err != nil {
+		slog.WarnContext(r.Context(), "fsbrowse.List falhou",
+			slog.String("module", logModule),
+			slog.String("event_id", "FS_BROWSE_FAIL"),
+			slog.String("path", path),
+			slog.String("error", err.Error()))
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// handleSelectAvid recebe o path da pasta "Avid MediaFiles" escolhida
+// na UI, valida (nome + presença de MXF/), e salva o root final
+// (path/MXF) em config.json. Aplica em runtime ainda não — exige
+// restart. PR seguinte fará reconfig dinâmico.
+func (s *Server) handleSelectAvid(w http.ResponseWriter, r *http.Request) {
+	if s.configPath == "" {
+		http.Error(w, "config path nao configurado", http.StatusServiceUnavailable)
+		return
+	}
+	var req struct {
+		AvidMediaFilesPath string `json:"avid_media_files_path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	mxfRoot, err := fsbrowse.ValidateAvidRoot(req.AvidMediaFilesPath)
+	if err != nil {
+		slog.WarnContext(r.Context(), "select-avid rejeitado",
+			slog.String("module", logModule),
+			slog.String("event_id", "SELECT_AVID_INVALID"),
+			slog.String("path", req.AvidMediaFilesPath),
+			slog.String("error", err.Error()))
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := config.Save(s.configPath, config.Persistent{Root: mxfRoot}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	slog.InfoContext(r.Context(), "Avid MediaFiles selecionado pela UI",
+		slog.String("module", logModule),
+		slog.String("event_id", "SELECT_AVID_OK"),
+		slog.String("avid_media_files", req.AvidMediaFilesPath),
+		slog.String("mxf_root", mxfRoot))
+	writeJSON(w, http.StatusOK, map[string]string{
+		"root":    mxfRoot,
+		"message": "Pasta Avid MediaFiles salva. Reinicie o MC Sinc para aplicar.",
 	})
 }
 

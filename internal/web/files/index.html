@@ -65,9 +65,35 @@
       margin-left: .35rem;
     }
     button.reject-btn:hover:not(:disabled) { background: rgba(248,113,113,.1); }
-    .root-edit { display: flex; gap: .5rem; margin-top: 1rem; align-items: center; }
-    .root-edit input { flex: 1; min-width: 0; }
     button.primary { background: var(--accent); color: #fff; border: 0; padding: .5rem 1rem; border-radius: 6px; cursor: pointer; font-size: .9rem; }
+    button.primary:disabled { opacity: .4; cursor: not-allowed; }
+    .modal {
+      position: fixed; inset: 0; background: rgba(0,0,0,.55);
+      display: flex; align-items: center; justify-content: center; z-index: 50;
+    }
+    .modal-content {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+      width: min(640px, 92vw); max-height: 80vh; display: flex; flex-direction: column;
+    }
+    .modal-header { display: flex; justify-content: space-between; align-items: center; padding: .8rem 1rem; border-bottom: 1px solid var(--border); }
+    .modal-header h3 { margin: 0; font-size: 1rem; }
+    .modal-breadcrumb { padding: .5rem 1rem; font-family: ui-monospace, Menlo, monospace; font-size: .85rem; color: var(--muted); border-bottom: 1px solid var(--border); word-break: break-all; }
+    .modal-list { padding: .25rem 0; overflow-y: auto; flex: 1; }
+    .modal-list .item {
+      padding: .55rem 1rem; cursor: pointer; display: flex; gap: .5rem; align-items: center;
+      border-bottom: 1px solid var(--border);
+    }
+    .modal-list .item:last-child { border-bottom: none; }
+    .modal-list .item:hover { background: rgba(255,255,255,.04); }
+    .modal-list .item.parent { color: var(--muted); }
+    .modal-list .item.avid { color: var(--accent); font-weight: 600; }
+    .modal-list .item .name { flex: 1; }
+    .modal-list .item .marker { font-size: .7rem; color: var(--muted); }
+    .modal-footer { display: flex; justify-content: space-between; align-items: center; padding: .8rem 1rem; border-top: 1px solid var(--border); gap: 1rem; }
+    .browse-status { font-size: .85rem; color: var(--muted); flex: 1; }
+    .browse-status.error { color: var(--danger); }
+    .browse-status.ok { color: var(--ok); }
+    .modal-actions { display: flex; gap: .5rem; }
     .restart-warn {
       margin-top: .75rem; padding: .6rem .8rem;
       background: rgba(251, 191, 36, .12);
@@ -194,13 +220,26 @@
         <dt id="label-connected"></dt><dd id="peers">—</dd>
         <dt id="label-avid"></dt><dd id="avid">—</dd>
       </dl>
-      <div id="root-edit" class="root-edit" hidden>
-        <input type="text" id="root-input" />
-        <button id="root-save-btn" class="primary"></button>
-        <button id="root-cancel-btn" class="ghost"></button>
-      </div>
       <div id="restart-warn" class="restart-warn" hidden></div>
     </section>
+
+    <div id="browse-modal" class="modal" hidden>
+      <div class="modal-content">
+        <header class="modal-header">
+          <h3 id="browse-title"></h3>
+          <button id="browse-close" class="ghost">×</button>
+        </header>
+        <div class="modal-breadcrumb" id="browse-breadcrumb"></div>
+        <div class="modal-list" id="browse-list"></div>
+        <footer class="modal-footer">
+          <span id="browse-status" class="browse-status"></span>
+          <span class="modal-actions">
+            <button id="browse-select" class="primary" disabled></button>
+            <button id="browse-cancel" class="ghost"></button>
+          </span>
+        </footer>
+      </div>
+    </div>
 
     <section class="panel">
       <h2 id="title-pending"></h2>
@@ -284,6 +323,15 @@
         rootCancelBtn: 'Cancelar',
         rootRestartWarn: 'Reinicie o MC Sinc para usar a nova pasta raiz.',
         alertRootSaveFail: 'Falha ao salvar pasta raiz: ',
+        browseTitle: 'Escolher pasta Avid MediaFiles',
+        browseSelectBtn: 'Selecionar esta pasta',
+        browseCancelBtn: 'Cancelar',
+        browseParent: '⬅ voltar',
+        browseVolumeList: 'volumes / drives',
+        browseHintRoot: 'Navegue até uma pasta chamada "Avid MediaFiles" e selecione-a.',
+        browseStatusInvalid: 'Esta pasta não é uma Avid MediaFiles válida.',
+        browseStatusReady: '✓ Avid MediaFiles válida — pode selecionar.',
+        browseStatusListing: 'carregando…',
 
         // Pluralização. Recebe n; cada língua define a regra que quiser.
         fileCount: (n) => `${n} arquivo${n === 1 ? '' : 's'}`,
@@ -351,9 +399,11 @@
       document.getElementById('reject-all-btn').textContent = t.rejectAllBtn;
       document.getElementById('clear-history-btn').textContent = t.clearHistoryBtn;
       document.getElementById('root-edit-btn').textContent = t.rootEditBtn;
-      document.getElementById('root-save-btn').textContent = t.rootSaveBtn;
-      document.getElementById('root-cancel-btn').textContent = t.rootCancelBtn;
       document.getElementById('restart-warn').textContent = t.rootRestartWarn;
+      document.getElementById('browse-title').textContent = t.browseTitle;
+      document.getElementById('browse-select').textContent = t.browseSelectBtn;
+      document.getElementById('browse-cancel').textContent = t.browseCancelBtn;
+      document.getElementById('browse-close').textContent = '×';
       // Botão Editar só aparece após primeiro refresh (precisa do root atual).
       document.getElementById('root-edit-btn').hidden = false;
 
@@ -746,36 +796,127 @@
       refresh();
     });
 
-    // Editar pasta raiz: abre input, salva via POST /config, mostra aviso
-    // de restart. Não reconfigura nada em runtime — uma sessão futura
-    // sobe com o novo --root via config.json.
-    document.getElementById('root-edit-btn').addEventListener('click', () => {
-      const current = document.getElementById('root').textContent;
-      document.getElementById('root-input').value = current === '—' ? '' : current;
-      document.getElementById('root-edit').hidden = false;
-      document.getElementById('root-edit-btn').hidden = true;
-    });
-    document.getElementById('root-cancel-btn').addEventListener('click', () => {
-      document.getElementById('root-edit').hidden = true;
-      document.getElementById('root-edit-btn').hidden = false;
-    });
-    document.getElementById('root-save-btn').addEventListener('click', async () => {
-      const newRoot = document.getElementById('root-input').value.trim();
+    // ===========================================================================
+    // Modal de browse de pastas — UI navega volumes/diretórios via /fs/browse e
+    // confirma seleção quando o usuário chegar numa pasta válida (nome
+    // "Avid MediaFiles" + subpasta MXF presente). Após confirmar, POST
+    // /config/select-avid persiste o root em config.json. Restart manual
+    // ainda é necessário (PR seguinte fará reconfig dinâmico).
+    // ===========================================================================
+    let browseCurrentPath = '';
+
+    function openBrowseModal() {
+      document.getElementById('browse-modal').hidden = false;
+      browseLoad(''); // começa nos volumes
+    }
+    function closeBrowseModal() {
+      document.getElementById('browse-modal').hidden = true;
+      browseCurrentPath = '';
+    }
+
+    async function browseLoad(path) {
+      const statusEl = document.getElementById('browse-status');
+      statusEl.className = 'browse-status';
+      statusEl.textContent = t.browseStatusListing;
       try {
-        const r = await fetch('/config', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ root: newRoot }),
-        });
+        const url = '/fs/browse' + (path ? '?path=' + encodeURIComponent(path) : '');
+        const r = await fetch(url);
         if (!r.ok) {
-          alert(t.alertRootSaveFail + await r.text());
+          statusEl.className = 'browse-status error';
+          statusEl.textContent = await r.text();
           return;
         }
-        document.getElementById('root-edit').hidden = true;
-        document.getElementById('root-edit-btn').hidden = false;
+        const data = await r.json();
+        renderBrowseList(data);
+      } catch (e) {
+        statusEl.className = 'browse-status error';
+        statusEl.textContent = e.message;
+      }
+    }
+
+    function renderBrowseList(data) {
+      browseCurrentPath = data.path || '';
+      // Breadcrumb: mostra o path atual ou "volumes / drives" quando raiz.
+      document.getElementById('browse-breadcrumb').textContent =
+        data.is_volume_list ? t.browseVolumeList : (data.path || '');
+
+      const listEl = document.getElementById('browse-list');
+      const rows = [];
+      if (data.parent) {
+        rows.push(`<div class="item parent" data-action="up" data-path="${escapeHTML(data.parent)}">${escapeHTML(t.browseParent)} ${escapeHTML(data.parent)}</div>`);
+      }
+      if (!data.entries || data.entries.length === 0) {
+        rows.push(`<div class="item parent">${escapeHTML(t.browseHintRoot)}</div>`);
+      } else {
+        for (const e of data.entries) {
+          const cls = e.is_avid_media_files ? 'item avid' : 'item';
+          const marker = e.is_avid_media_files ? '★ Avid MediaFiles' : '';
+          rows.push(`<div class="${cls}" data-action="enter" data-path="${escapeHTML(e.path)}">
+            <span class="name">${escapeHTML(e.name)}</span>
+            <span class="marker">${marker}</span>
+          </div>`);
+        }
+      }
+      listEl.innerHTML = rows.join('');
+
+      // Atualiza estado do botão "Selecionar": habilita só quando o
+      // path ATUAL é uma Avid MediaFiles válida (nome correto + MXF).
+      updateBrowseSelectState(data.path);
+    }
+
+    async function updateBrowseSelectState(path) {
+      const btn = document.getElementById('browse-select');
+      const statusEl = document.getElementById('browse-status');
+      // Heurística rápida: nome do path precisa ser "Avid MediaFiles".
+      // Validação completa (com MXF/) só acontece ao clicar Selecionar
+      // — backend valida lá. Aqui só pré-filtramos.
+      if (!path) {
+        btn.disabled = true;
+        statusEl.className = 'browse-status';
+        statusEl.textContent = t.browseHintRoot;
+        return;
+      }
+      const baseName = path.split(/[/\\]/).filter(Boolean).pop() || '';
+      if (baseName !== 'Avid MediaFiles') {
+        btn.disabled = true;
+        statusEl.className = 'browse-status';
+        statusEl.textContent = t.browseHintRoot;
+        return;
+      }
+      btn.disabled = false;
+      statusEl.className = 'browse-status ok';
+      statusEl.textContent = t.browseStatusReady;
+    }
+
+    document.getElementById('root-edit-btn').addEventListener('click', openBrowseModal);
+    document.getElementById('browse-cancel').addEventListener('click', closeBrowseModal);
+    document.getElementById('browse-close').addEventListener('click', closeBrowseModal);
+
+    document.getElementById('browse-list').addEventListener('click', (ev) => {
+      const item = ev.target.closest('.item');
+      if (!item || !item.dataset.path) return;
+      browseLoad(item.dataset.path);
+    });
+
+    document.getElementById('browse-select').addEventListener('click', async () => {
+      if (!browseCurrentPath) return;
+      const statusEl = document.getElementById('browse-status');
+      try {
+        const r = await fetch('/config/select-avid', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ avid_media_files_path: browseCurrentPath }),
+        });
+        if (!r.ok) {
+          statusEl.className = 'browse-status error';
+          statusEl.textContent = await r.text();
+          return;
+        }
+        closeBrowseModal();
         document.getElementById('restart-warn').hidden = false;
       } catch (e) {
-        alert(t.alertError + e.message);
+        statusEl.className = 'browse-status error';
+        statusEl.textContent = e.message;
       }
     });
 
