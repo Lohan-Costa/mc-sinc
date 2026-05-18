@@ -124,9 +124,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Root:        s.root,
 		ProcessName: s.avidProcess,
 	})
-	// "no msmMMOB.mdb found" é esperado em pasta fake/Avid sem mídia ainda —
-	// não polui o log. snap.State == "unknown" já comunica isso na wire.
-	if err != nil && !strings.Contains(err.Error(), "no msmMMOB.mdb") {
+	// Vários erros de avid.Detect são "ruído normal" e não precisam aparecer
+	// no log — basta snap.State na wire.
+	//   - "no msmMMOB.mdb"        Avid sem mídia ainda na pasta
+	//   - "no such file"          root inexistente (Unix)
+	//   - "cannot find the path"  root inexistente (Windows)
+	// Erros DESCONHECIDOS (permissão, etc.) continuam logados.
+	if err != nil && !isExpectedAvidErr(err.Error()) {
 		slog.WarnContext(r.Context(), "avid.Detect falhou",
 			slog.String("module", logModule),
 			slog.String("event_id", "AVID_DETECT_FAIL"),
@@ -302,4 +306,20 @@ func opIDMiddleware(next http.Handler) http.Handler {
 		ctx, _ := logpkg.NewOp(r.Context())
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// isExpectedAvidErr filtra mensagens conhecidas de avid.Detect que são
+// ruído normal (não erros reais). Mantém em uma função pra ficar testável
+// se precisar e centralizar a lista de substrings.
+func isExpectedAvidErr(msg string) bool {
+	for _, sub := range []string{
+		"no msmMMOB.mdb",     // pasta sem .mdb ainda
+		"no such file",       // root inexistente (Unix)
+		"cannot find the path", // root inexistente (Windows)
+	} {
+		if strings.Contains(msg, sub) {
+			return true
+		}
+	}
+	return false
 }
