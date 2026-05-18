@@ -8,6 +8,7 @@ package watcher
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -59,6 +60,13 @@ func (w *Watcher) Run(ctx context.Context) error {
 		return err
 	}
 
+	// fsnotify só dispara em eventos POSTERIORES ao Add — arquivos que
+	// já estão na pasta quando o mcsinc arranca (Avid que produziu antes
+	// do restart, fake .mxf do cross-test) nunca virariam "discovered".
+	// Emite Events sintéticos pra esses arquivos no mesmo canal; o drainer
+	// faz Upsert idempotente.
+	w.emitExisting()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -97,6 +105,27 @@ func (w *Watcher) schedule(ev fsnotify.Event) {
 
 		w.Events <- Event{Path: ev.Name, Op: ev.Op, At: time.Now()}
 	})
+}
+
+// emitExisting varre w.root uma vez e emite um Event sintético pra cada
+// .mxf encontrado. Idempotente do lado do consumer (store.Upsert).
+func (w *Watcher) emitExisting() {
+	entries, err := os.ReadDir(w.root)
+	if err != nil {
+		// fsw.Add já teria falhado se a pasta fosse inacessível, mas se
+		// chegou aqui com erro, o loop fsnotify segue normalmente.
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := filepath.Join(w.root, e.Name())
+		if !isMXF(name) {
+			continue
+		}
+		w.Events <- Event{Path: name, Op: fsnotify.Create, At: time.Now()}
+	}
 }
 
 func isMXF(path string) bool {
