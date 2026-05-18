@@ -60,6 +60,8 @@ func run() error {
 			"pasta onde app.log e app.jsonl moram")
 		autoPull = flag.Bool("auto-pull", true,
 			"baixar commits recebidos automaticamente quando Avid estiver idle (fechado ≥5min)")
+		autoCommit = flag.Bool("auto-commit", true,
+			"commitar e enviar mudancas automaticamente quando Avid estiver idle")
 	)
 	flag.Parse()
 
@@ -214,7 +216,9 @@ func run() error {
 
 	// Auto-pull: baixa commits recebidos quando Avid está idle. Pode ser
 	// desativado com --auto-pull=false (útil em apresentação ou debug).
-	if *autoPull {
+	// Auto-mode: combina auto-pull (--auto-pull) e auto-commit (--auto-commit).
+	// Goroutine só sobe se PELO MENOS um deles estiver habilitado.
+	if *autoPull || *autoCommit {
 		go func() {
 			cfg := automode.Config{
 				Detect: func() (avid.Snapshot, error) {
@@ -223,9 +227,12 @@ func run() error {
 						ProcessName: *avidProcess,
 					})
 				},
-				Store:     store,
-				Transport: tport,
-				Interval:  30 * time.Second,
+				Store:      store,
+				Transport:  tport,
+				Commits:    commits,
+				AutoPull:   *autoPull,
+				AutoCommit: *autoCommit,
+				Interval:   30 * time.Second,
 			}
 			if err := automode.Run(ctx, cfg); err != nil && !errors.Is(err, context.Canceled) {
 				slog.Warn("automode encerrou com erro",
@@ -234,11 +241,13 @@ func run() error {
 					slog.String("error", err.Error()))
 			}
 		}()
-		slog.Info("auto-pull ativo",
+		slog.Info("auto-mode ativo",
 			slog.String("module", "main"),
-			slog.String("event_id", "AUTOMODE_ENABLED"))
+			slog.String("event_id", "AUTOMODE_ENABLED"),
+			slog.Bool("auto_pull", *autoPull),
+			slog.Bool("auto_commit", *autoCommit))
 	} else {
-		slog.Info("auto-pull desativado por flag",
+		slog.Info("auto-mode totalmente desativado por flags",
 			slog.String("module", "main"),
 			slog.String("event_id", "AUTOMODE_DISABLED"))
 	}

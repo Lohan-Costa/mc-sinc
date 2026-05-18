@@ -9,6 +9,7 @@ import (
 
 	"github.com/Lohan-Costa/mc-sinc/internal/automode"
 	"github.com/Lohan-Costa/mc-sinc/internal/avid"
+	"github.com/Lohan-Costa/mc-sinc/internal/commit"
 	"github.com/Lohan-Costa/mc-sinc/internal/manifest"
 )
 
@@ -36,12 +37,24 @@ func (f *fakeStore) ListCommits(dir manifest.Direction, status manifest.CommitSt
 	return f.commits[string(dir)+"|"+string(status)], nil
 }
 
-// fakeTransport satisfaz automode.Transport. Registra invocações de Pull
-// num slice protegido por mutex.
+// SaveCommit grava sob direction|"" (compatível com como o automode lê).
+func (f *fakeStore) SaveCommit(c manifest.Commit) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := string(c.Direction) + "|"
+	// Insere no início (created_at desc é o padrão de ListCommits).
+	f.commits[key] = append([]manifest.Commit{c}, f.commits[key]...)
+	return nil
+}
+
+// fakeTransport satisfaz automode.Transport. Registra invocações de
+// Pull/Send num slice protegido por mutex.
 type fakeTransport struct {
 	mu      sync.Mutex
 	pulled  []string
+	sent    []string
 	pullErr error
+	sendErr error
 }
 
 func (f *fakeTransport) Pull(ctx context.Context, id string) error {
@@ -51,12 +64,63 @@ func (f *fakeTransport) Pull(ctx context.Context, id string) error {
 	return f.pullErr
 }
 
+func (f *fakeTransport) Send(ctx context.Context, c *commit.Commit) error {
+	f.mu.Lock()
+	f.sent = append(f.sent, c.ID)
+	f.mu.Unlock()
+	return f.sendErr
+}
+
 func (f *fakeTransport) pulledIDs() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make([]string, len(f.pulled))
 	copy(out, f.pulled)
 	return out
+}
+
+func (f *fakeTransport) sentIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.sent))
+	copy(out, f.sent)
+	return out
+}
+
+// fakeCommitter satisfaz automode.Committer. Cada Commit() devolve um
+// commit com files predefinidos, e registra invocações.
+type fakeCommitter struct {
+	mu      sync.Mutex
+	calls   int
+	files   []commit.FileSpec
+	makeErr error
+}
+
+func (f *fakeCommitter) Commit(ctx context.Context, msg string) (*commit.Commit, error) {
+	f.mu.Lock()
+	f.calls++
+	idx := f.calls
+	f.mu.Unlock()
+	if f.makeErr != nil {
+		return nil, f.makeErr
+	}
+	return &commit.Commit{
+		ID:        commitID(idx),
+		Author:    "auto-test",
+		Message:   msg,
+		Files:     f.files,
+		CreatedAt: time.Now(),
+	}, nil
+}
+
+func (f *fakeCommitter) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+func commitID(i int) string {
+	return time.Now().Format("0405") + "-auto-" + string(rune('a'+i))
 }
 
 // runUntil sobe automode.Run em goroutine e cancela após `d`. Útil pra
@@ -92,6 +156,7 @@ func TestAutoModeDisparaEmStateIdle(t *testing.T) {
 		},
 		Store:     store,
 		Transport: tport,
+		AutoPull:  true,
 		Interval:  10 * time.Millisecond,
 	}
 	runUntil(t, cfg, 50*time.Millisecond)
@@ -119,6 +184,7 @@ func TestAutoModeNaoDisparaEmStateBusy(t *testing.T) {
 		},
 		Store:     store,
 		Transport: tport,
+		AutoPull:  true,
 		Interval:  10 * time.Millisecond,
 	}
 	runUntil(t, cfg, 50*time.Millisecond)
@@ -143,6 +209,7 @@ func TestAutoModeDisparaEmUnknownSemProcesso(t *testing.T) {
 		},
 		Store:     store,
 		Transport: tport,
+		AutoPull:  true,
 		Interval:  10 * time.Millisecond,
 	}
 	runUntil(t, cfg, 50*time.Millisecond)
@@ -167,6 +234,7 @@ func TestAutoModeNaoDisparaEmUnknownComProcesso(t *testing.T) {
 		},
 		Store:     store,
 		Transport: tport,
+		AutoPull:  true,
 		Interval:  10 * time.Millisecond,
 	}
 	runUntil(t, cfg, 50*time.Millisecond)
@@ -189,6 +257,7 @@ func TestAutoModeNaoDisparaEmRecentlyClosed(t *testing.T) {
 		},
 		Store:     store,
 		Transport: tport,
+		AutoPull:  true,
 		Interval:  10 * time.Millisecond,
 	}
 	runUntil(t, cfg, 50*time.Millisecond)
@@ -208,6 +277,7 @@ func TestAutoModeNaoDisparaSeNadaAnnounced(t *testing.T) {
 		},
 		Store:     store,
 		Transport: tport,
+		AutoPull:  true,
 		Interval:  10 * time.Millisecond,
 	}
 	runUntil(t, cfg, 50*time.Millisecond)
@@ -233,11 +303,156 @@ func TestAutoModeRespeitaCancel(t *testing.T) {
 		},
 		Store:     store,
 		Transport: tport,
+		AutoPull:  true,
 		Interval:  10 * time.Millisecond,
 	}
 	err := automode.Run(ctx, cfg)
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("Run deveria retornar context.Canceled; got %v", err)
+	}
+}
+
+// --- Testes auto-commit ---
+
+func TestAutoCommitDisparaQuandoMdbMudou(t *testing.T) {
+	store := newFakeStore()
+	// Último sent foi há 1h; LastMDBChange agora -> mudança.
+	lastSent := time.Now().Add(-time.Hour)
+	store.set(manifest.DirectionSent, "", []manifest.Commit{
+		{ID: "antigo", CreatedAt: lastSent},
+	})
+	tport := &fakeTransport{}
+	committer := &fakeCommitter{
+		files: []commit.FileSpec{{Path: "1/clip.mxf", Hash: "h", Size: 1}},
+	}
+
+	cfg := automode.Config{
+		Detect: func() (avid.Snapshot, error) {
+			return avid.Snapshot{State: avid.StateIdle, LastMDBChange: time.Now()}, nil
+		},
+		Store:      store,
+		Transport:  tport,
+		Commits:    committer,
+		AutoCommit: true,
+		Interval:   10 * time.Millisecond,
+	}
+	runUntil(t, cfg, 50*time.Millisecond)
+
+	if committer.callCount() == 0 {
+		t.Errorf("Commits.Commit deveria ter sido chamado")
+	}
+	if got := tport.sentIDs(); len(got) == 0 {
+		t.Errorf("Transport.Send deveria ter sido chamado")
+	}
+}
+
+func TestAutoCommitNaoDisparaSeMdbNaoMudou(t *testing.T) {
+	store := newFakeStore()
+	// Último sent ocorreu há 1h, e LastMDBChange foi há 2h (antes do sent).
+	lastSent := time.Now().Add(-time.Hour)
+	store.set(manifest.DirectionSent, "", []manifest.Commit{
+		{ID: "antigo", CreatedAt: lastSent},
+	})
+	tport := &fakeTransport{}
+	committer := &fakeCommitter{
+		files: []commit.FileSpec{{Path: "1/clip.mxf", Hash: "h", Size: 1}},
+	}
+
+	cfg := automode.Config{
+		Detect: func() (avid.Snapshot, error) {
+			return avid.Snapshot{
+				State:         avid.StateIdle,
+				LastMDBChange: time.Now().Add(-2 * time.Hour),
+			}, nil
+		},
+		Store:      store,
+		Transport:  tport,
+		Commits:    committer,
+		AutoCommit: true,
+		Interval:   10 * time.Millisecond,
+	}
+	runUntil(t, cfg, 50*time.Millisecond)
+
+	if committer.callCount() != 0 {
+		t.Errorf("Commits.Commit nao deveria ter sido chamado; calls=%d", committer.callCount())
+	}
+}
+
+// Primeira instalação (zero sent) com .mdb conhecido sempre dispara.
+func TestAutoCommitPrimeiraVezDispara(t *testing.T) {
+	store := newFakeStore() // sem sent
+	tport := &fakeTransport{}
+	committer := &fakeCommitter{
+		files: []commit.FileSpec{{Path: "1/clip.mxf", Hash: "h", Size: 1}},
+	}
+
+	cfg := automode.Config{
+		Detect: func() (avid.Snapshot, error) {
+			return avid.Snapshot{State: avid.StateIdle, LastMDBChange: time.Now()}, nil
+		},
+		Store:      store,
+		Transport:  tport,
+		Commits:    committer,
+		AutoCommit: true,
+		Interval:   10 * time.Millisecond,
+	}
+	runUntil(t, cfg, 50*time.Millisecond)
+
+	if committer.callCount() == 0 {
+		t.Errorf("primeira vez deveria sempre commitar; calls=%d", committer.callCount())
+	}
+}
+
+// Sem .mdb conhecido e já há sent: não dispara (sem sinal confiável).
+func TestAutoCommitNaoDisparaSemMdbESemSent(t *testing.T) {
+	store := newFakeStore()
+	store.set(manifest.DirectionSent, "", []manifest.Commit{
+		{ID: "antigo", CreatedAt: time.Now().Add(-time.Hour)},
+	})
+	tport := &fakeTransport{}
+	committer := &fakeCommitter{
+		files: []commit.FileSpec{{Path: "1/clip.mxf", Hash: "h", Size: 1}},
+	}
+
+	cfg := automode.Config{
+		Detect: func() (avid.Snapshot, error) {
+			// LastMDBChange zero = sem .mdb conhecido.
+			return avid.Snapshot{State: avid.StateUnknown, ProcessRunning: false}, nil
+		},
+		Store:      store,
+		Transport:  tport,
+		Commits:    committer,
+		AutoCommit: true,
+		Interval:   10 * time.Millisecond,
+	}
+	runUntil(t, cfg, 50*time.Millisecond)
+
+	if committer.callCount() != 0 {
+		t.Errorf("nao deveria commitar sem sinal de mudança; calls=%d", committer.callCount())
+	}
+}
+
+func TestAutoCommitDesligadoNaoChama(t *testing.T) {
+	store := newFakeStore()
+	tport := &fakeTransport{}
+	committer := &fakeCommitter{
+		files: []commit.FileSpec{{Path: "1/clip.mxf", Hash: "h", Size: 1}},
+	}
+
+	cfg := automode.Config{
+		Detect: func() (avid.Snapshot, error) {
+			return avid.Snapshot{State: avid.StateIdle, LastMDBChange: time.Now()}, nil
+		},
+		Store:      store,
+		Transport:  tport,
+		Commits:    committer,
+		AutoCommit: false, // explicito
+		Interval:   10 * time.Millisecond,
+	}
+	runUntil(t, cfg, 50*time.Millisecond)
+
+	if committer.callCount() != 0 {
+		t.Errorf("AutoCommit=false nao deveria chamar Commits.Commit")
 	}
 }
 
@@ -264,6 +479,7 @@ func TestAutoModeContinuaApesDetectFail(t *testing.T) {
 		},
 		Store:     store,
 		Transport: tport,
+		AutoPull:  true,
 		Interval:  10 * time.Millisecond,
 	}
 	runUntil(t, cfg, 80*time.Millisecond)
