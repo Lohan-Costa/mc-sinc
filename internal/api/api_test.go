@@ -157,15 +157,19 @@ func TestHandleStatusEmptyPeers(t *testing.T) {
 	}
 }
 
-func TestHandlePendingListaDiscovered(t *testing.T) {
+func TestHandlePendingListaDiscoveredEStaged(t *testing.T) {
 	e := newTestEnv(t)
 	must(t, e.store.Upsert(manifest.File{
 		Path: "1/a.mxf", Hash: "deadbeef", Size: 100,
 		ModifiedAt: time.Now(), Status: manifest.StatusDiscovered,
 	}))
 	must(t, e.store.Upsert(manifest.File{
-		Path: "1/b.mxf", Hash: "", Size: 200,
-		ModifiedAt: time.Now(), Status: manifest.StatusStaged, // não deve aparecer
+		Path: "1/b.mxf", Hash: "feedbeef", Size: 200,
+		ModifiedAt: time.Now(), Status: manifest.StatusStaged,
+	}))
+	must(t, e.store.Upsert(manifest.File{
+		Path: "1/c.mxf", Hash: "cafe", Size: 300,
+		ModifiedAt: time.Now(), Status: manifest.StatusCommitted, // não deve aparecer
 	}))
 
 	rr := e.request(t, "GET", "/pending", nil)
@@ -176,8 +180,12 @@ func TestHandlePendingListaDiscovered(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &files); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(files) != 1 || files[0].Path != "1/a.mxf" {
-		t.Errorf("pending=%v, esperava só 1/a.mxf", files)
+	paths := map[string]manifest.Status{}
+	for _, f := range files {
+		paths[f.Path] = f.Status
+	}
+	if len(paths) != 2 || paths["1/a.mxf"] != manifest.StatusDiscovered || paths["1/b.mxf"] != manifest.StatusStaged {
+		t.Errorf("pending=%v, esperava a=discovered e b=staged", paths)
 	}
 }
 
@@ -212,15 +220,19 @@ func TestHandleStageSemPathDevolve400(t *testing.T) {
 	}
 }
 
-func TestHandleCommitAutoStageInclueComHash(t *testing.T) {
+func TestHandleCommitInclueStagedComHash(t *testing.T) {
 	e := newTestEnv(t)
 	must(t, e.store.Upsert(manifest.File{
 		Path: "1/com_hash.mxf", Hash: "deadbeef", Size: 100,
-		ModifiedAt: time.Now(), Status: manifest.StatusDiscovered,
+		ModifiedAt: time.Now(), Status: manifest.StatusStaged,
 	}))
 	must(t, e.store.Upsert(manifest.File{
 		Path: "1/sem_hash.mxf", Hash: "", Size: 200,
-		ModifiedAt: time.Now(), Status: manifest.StatusDiscovered,
+		ModifiedAt: time.Now(), Status: manifest.StatusStaged,
+	}))
+	must(t, e.store.Upsert(manifest.File{
+		Path: "1/discovered.mxf", Hash: "feedbeef", Size: 300,
+		ModifiedAt: time.Now(), Status: manifest.StatusDiscovered, // não staged: ignorado
 	}))
 
 	body, _ := json.Marshal(map[string]string{"message": "smoke"})
@@ -239,7 +251,6 @@ func TestHandleCommitAutoStageInclueComHash(t *testing.T) {
 		t.Errorf("message=%q", c.Message)
 	}
 
-	// O commit deve ter sido persistido como direction=sent.
 	sent, err := e.store.ListCommits(manifest.DirectionSent, "")
 	if err != nil {
 		t.Fatal(err)
@@ -248,7 +259,6 @@ func TestHandleCommitAutoStageInclueComHash(t *testing.T) {
 		t.Errorf("persisted commits=%v", sent)
 	}
 
-	// Wait drena a goroutine de Send. Sem isso o teste fica race-prone.
 	if err := e.srv.Wait(timeoutCtx(t, 2*time.Second)); err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
@@ -257,19 +267,51 @@ func TestHandleCommitAutoStageInclueComHash(t *testing.T) {
 	}
 }
 
-func TestHandleCommitSemDiscoveredNaoChamaSend(t *testing.T) {
+func TestHandleCommitSemStagedDevolve400(t *testing.T) {
 	e := newTestEnv(t)
-	// manifest vazio
+	// manifest vazio: nada staged
 	body, _ := json.Marshal(map[string]string{"message": "vazio"})
 	rr := e.request(t, "POST", "/commit", body)
-	if rr.Code != http.StatusOK {
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d, esperava 400; body=%s", rr.Code, rr.Body.String())
+	}
+	if got := e.tport.sent(); len(got) != 0 {
+		t.Errorf("transport.Send foi chamado: %v", got)
+	}
+}
+
+func TestHandleCommitStagedSemHashDevolve400(t *testing.T) {
+	e := newTestEnv(t)
+	must(t, e.store.Upsert(manifest.File{
+		Path: "1/a.mxf", Hash: "", Size: 100,
+		ModifiedAt: time.Now(), Status: manifest.StatusStaged,
+	}))
+	body, _ := json.Marshal(map[string]string{"message": "msg"})
+	rr := e.request(t, "POST", "/commit", body)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d, esperava 400", rr.Code)
+	}
+}
+
+func TestHandleUnstageVoltaParaDiscovered(t *testing.T) {
+	e := newTestEnv(t)
+	must(t, e.store.Upsert(manifest.File{
+		Path: "1/a.mxf", Hash: "deadbeef", Size: 100,
+		ModifiedAt: time.Now(), Status: manifest.StatusStaged,
+	}))
+
+	body, _ := json.Marshal(map[string]string{"path": "1/a.mxf"})
+	rr := e.request(t, "POST", "/unstage", body)
+	if rr.Code != http.StatusNoContent {
 		t.Fatalf("code=%d, body=%s", rr.Code, rr.Body.String())
 	}
-	// Send roda mesmo com commit vazio (a wg foi incrementada). Sincroniza.
-	if err := e.srv.Wait(timeoutCtx(t, 2*time.Second)); err != nil {
-		t.Fatalf("Wait: %v", err)
+	files, err := e.store.ByStatus(manifest.StatusDiscovered)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Send é chamado com Files=[]; o transport não falha por isso. OK.
+	if len(files) != 1 || files[0].Path != "1/a.mxf" {
+		t.Errorf("discovered=%v", files)
+	}
 }
 
 func TestHandlePullDevolve202EchamaTransport(t *testing.T) {
@@ -306,7 +348,7 @@ func TestWaitEsperaSendTerminar(t *testing.T) {
 
 	must(t, store.Upsert(manifest.File{
 		Path: "1/a.mxf", Hash: "deadbeef", Size: 100,
-		ModifiedAt: time.Now(), Status: manifest.StatusDiscovered,
+		ModifiedAt: time.Now(), Status: manifest.StatusStaged,
 	}))
 
 	tport := &stubTransport{

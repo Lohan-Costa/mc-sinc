@@ -3,8 +3,9 @@
 // Endpoints UI-facing:
 //
 //	GET  /status              → estado geral do nó (user, root, peers, contadores)
-//	GET  /pending             → arquivos detectados aguardando decisão do usuário
+//	GET  /pending             → arquivos detectados ou staged (UI marca staged via Status)
 //	POST /stage               → marca um arquivo para entrar no próximo commit
+//	POST /unstage             → desmarca um arquivo (volta para discovered)
 //	POST /commit              → executa um commit dos arquivos staged
 //	GET  /commits/sent        → histórico de commits anunciados aos peers
 //	GET  /commits/received    → commits anunciados por peers (aguardando pull)
@@ -123,6 +124,7 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/status", s.handleStatus)
 	r.Get("/pending", s.handlePending)
 	r.Post("/stage", s.handleStage)
+	r.Post("/unstage", s.handleUnstage)
 	r.Post("/commit", s.handleCommit)
 
 	r.Get("/commits/sent", s.handleListCommits(manifest.DirectionSent))
@@ -185,11 +187,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePending(w http.ResponseWriter, r *http.Request) {
-	files, err := s.store.ByStatus(manifest.StatusDiscovered)
+	// "Pendentes" inclui tanto arquivos discovered (sem decisão) quanto
+	// staged (já marcados pra próximo commit). A UI distingue pelo campo
+	// Status pra renderizar o checkbox marcado/desmarcado.
+	discovered, err := s.store.ByStatus(manifest.StatusDiscovered)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	staged, err := s.store.ByStatus(manifest.StatusStaged)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	files := append(discovered, staged...)
 	writeJSON(w, http.StatusOK, files)
 }
 
@@ -214,6 +225,23 @@ func (s *Server) handleStage(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) handleUnstage(w http.ResponseWriter, r *http.Request) {
+	var req stageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Path == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+	if err := s.commits.Unstage(r.Context(), req.Path); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 type commitRequest struct {
 	Message string `json:"message"`
 }
@@ -225,24 +253,25 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO(ui): a UI ainda não tem botão Stage por arquivo. Enquanto isso,
-	// "Enviar" = stage de tudo que está em 'discovered' (com hash já calculado)
-	// + commit + announce. Arquivos sem hash são pulados — entram no próximo
-	// Enviar quando o hasher passar. Quando o botão Stage entrar (PR futura),
-	// esse bloco vira opt-out (ex: ?stage=auto) ou sai.
-	if discovered, derr := s.store.ByStatus(manifest.StatusDiscovered); derr == nil {
-		for _, f := range discovered {
-			if f.Hash == "" {
-				continue
-			}
-			if err := s.commits.Stage(r.Context(), f.Path); err != nil {
-				slog.WarnContext(r.Context(), "auto-stage falhou pra arquivo",
-					slog.String("module", logModule),
-					slog.String("event_id", "AUTO_STAGE_FAIL"),
-					slog.String("path", f.Path),
-					slog.String("error", err.Error()))
-			}
+	// Rejeita commit vazio explicitamente — a UI desabilita o botao
+	// Enviar quando nao ha staged, mas se alguem chamar via curl ou
+	// se houver race com o refresh, devolvemos 400 em vez de criar
+	// um commit fantasma.
+	staged, err := s.store.ByStatus(manifest.StatusStaged)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	hasHashable := false
+	for _, f := range staged {
+		if f.Hash != "" {
+			hasHashable = true
+			break
 		}
+	}
+	if !hasHashable {
+		http.Error(w, "nenhum arquivo staged com hash calculado", http.StatusBadRequest)
+		return
 	}
 
 	c, err := s.commits.Commit(r.Context(), req.Message)

@@ -57,10 +57,16 @@
       font-family: ui-monospace, "SF Mono", Menlo, monospace;
       font-size: .85rem;
       display: flex;
-      justify-content: space-between;
+      align-items: center;
       gap: 1rem;
     }
     ul.files li:last-child { border-bottom: none; }
+    ul.files li .path { flex: 1; }
+    ul.files li .size { color: var(--muted); }
+    ul.files li.no-hash { opacity: .55; }
+    ul.files li.no-hash .hash-note { color: var(--muted); font-style: italic; }
+    ul.files input[type=checkbox] { cursor: pointer; }
+    ul.files input[type=checkbox]:disabled { cursor: not-allowed; }
     .empty { color: var(--muted); font-style: italic; }
     button {
       background: var(--accent); color: #fff; border: 0; padding: .5rem 1rem;
@@ -165,7 +171,7 @@
       <ul class="files" id="pending"><li class="empty"></li></ul>
       <div class="commit-form">
         <input type="text" id="message" />
-        <button id="commit-btn"></button>
+        <button id="commit-btn" disabled></button>
       </div>
     </section>
 
@@ -210,6 +216,7 @@
         emptyPending: 'sem arquivos pendentes — siga editando.',
         messagePlaceholder: 'mensagem do envio (ex: cenas 12-14)',
         sendBtn: 'Enviar',
+        hashCalculating: 'calculando hash…',
 
         // Empty states dos cards
         emptyReceived: 'ninguém te enviou nada ainda.',
@@ -246,6 +253,7 @@
         alertWriteMsg: 'Escreva uma mensagem antes de enviar.',
         alertSendFail: 'Falha ao enviar: ',
         alertPullFail: 'Falha ao baixar: ',
+        alertStageFail: 'Falha ao marcar/desmarcar arquivo: ',
         alertError: 'Erro: ',
 
         // Connection badge (aparece quando o backend não responde)
@@ -360,6 +368,33 @@
     // Render
     // ===========================================================================
 
+    // renderPendingRow renderiza uma linha de Pendentes com checkbox. Arquivos
+    // sem hash calculado têm o checkbox desabilitado (não dá pra fazer commit
+    // sem hash — backend rejeita).
+    function renderPendingRow(f) {
+      const isStaged = f.Status === 'staged';
+      const hasHash = !!f.Hash;
+      const liClass = hasHash ? '' : 'no-hash';
+      const checked = isStaged ? 'checked' : '';
+      const disabled = hasHash ? '' : 'disabled';
+      const note = hasHash ? '' : `<span class="hash-note">${escapeHTML(t.hashCalculating)}</span>`;
+      return `<li class="${liClass}">
+        <input type="checkbox" class="stage-cb" data-path="${escapeHTML(f.Path)}" ${checked} ${disabled} />
+        <span class="path">${escapeHTML(f.Path)}</span>
+        ${note}
+        <span class="size">${fmtSize(f.Size)}</span>
+      </li>`;
+    }
+
+    // updateCommitBtnState ativa o botão Enviar somente quando há pelo menos 1
+    // arquivo staged com hash. Backend valida o mesmo invariante, mas o feedback
+    // visual evita o usuário clicar sem nada selecionado.
+    function updateCommitBtnState(pending) {
+      const btn = document.getElementById('commit-btn');
+      const hasStaged = (pending || []).some(f => f.Status === 'staged' && f.Hash);
+      btn.disabled = !hasStaged;
+    }
+
     function renderAvidBadge(av) {
       if (!av || !av.state) {
         return `<span class="badge unknown">${escapeHTML(t.avidState.unknown)}</span>`;
@@ -453,10 +488,9 @@
         if (!pending || pending.length === 0) {
           pendingList.innerHTML = `<li class="empty">${escapeHTML(t.emptyPending)}</li>`;
         } else {
-          pendingList.innerHTML = pending.map(f =>
-            `<li><span>${escapeHTML(f.Path)}</span><span>${fmtSize(f.Size)}</span></li>`
-          ).join('');
+          pendingList.innerHTML = pending.map(f => renderPendingRow(f)).join('');
         }
+        updateCommitBtnState(pending);
 
         // Limpa o pullsInFlight pra ids cujo status já saiu de 'announced'.
         if (received) {
@@ -565,6 +599,40 @@
     }
     trackToggles(document.getElementById('received'));
     trackToggles(document.getElementById('sent'));
+
+    // Delegação no #pending: change no checkbox dispara POST /stage ou /unstage.
+    // Otimista — refresh subsequente reconcilia (se backend rejeitar, checkbox
+    // volta no próximo tick). Botão Enviar é re-avaliado imediatamente.
+    document.getElementById('pending').addEventListener('change', async (ev) => {
+      const cb = ev.target;
+      if (!cb.classList.contains('stage-cb')) return;
+      const path = cb.dataset.path;
+      if (!path) return;
+
+      // Trava o checkbox enquanto o request está em voo pra evitar
+      // toggles em rajada gerando race no manifest.
+      cb.disabled = true;
+      const endpoint = cb.checked ? '/stage' : '/unstage';
+      try {
+        const r = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path }),
+        });
+        if (!r.ok) {
+          alert(t.alertStageFail + await r.text());
+          cb.checked = !cb.checked; // reverte UI
+        }
+      } catch (e) {
+        alert(t.alertError + e.message);
+        cb.checked = !cb.checked;
+      } finally {
+        cb.disabled = false;
+      }
+      // Re-avalia Enviar baseado no novo estado da DOM.
+      const anyChecked = document.querySelectorAll('#pending .stage-cb:checked').length > 0;
+      document.getElementById('commit-btn').disabled = !anyChecked;
+    });
 
     // Delegação de evento — cards são re-renderizados a cada 4s,
     // então não dá pra anexar listener por card direto.
