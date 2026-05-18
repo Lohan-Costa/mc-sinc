@@ -10,6 +10,8 @@
 //	GET  /commits/sent        → histórico de commits anunciados aos peers
 //	GET  /commits/received    → commits anunciados por peers (aguardando pull)
 //	POST /commits/{id}/pull   → baixa arquivos do commit recebido para MXF/1-<sender>/
+//	POST /commits/{id}/reject → marca commit recebido como rejeitado (não baixa)
+//	POST /commits/clear       → apaga commits recebidos já finalizados (pulled/rejected/failed)
 //	GET  /                    → serve a UI web (assets embutidos via internal/web)
 //
 // Endpoints peer-facing são montados em /peer/* via Transport.Routes().
@@ -131,6 +133,8 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/commits/sent", s.handleListCommits(manifest.DirectionSent))
 	r.Get("/commits/received", s.handleListCommits(manifest.DirectionReceived))
 	r.Post("/commits/{id}/pull", s.handlePull)
+	r.Post("/commits/{id}/reject", s.handleReject)
+	r.Post("/commits/clear", s.handleClearFinished)
 
 	if s.transport != nil {
 		r.Mount("/peer", s.transport.Routes())
@@ -376,6 +380,51 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// handleReject marca um commit recebido como rejected — usuário decidiu
+// não baixar. Preserva o registro no manifest pra auditoria. UI esconde
+// commits rejected por padrão.
+func (s *Server) handleReject(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		http.Error(w, "id required", http.StatusBadRequest)
+		return
+	}
+	if err := s.store.UpdateCommitStatus(id, manifest.CommitStatusRejected); err != nil {
+		slog.WarnContext(r.Context(), "reject falhou",
+			slog.String("module", logModule),
+			slog.String("event_id", "COMMIT_REJECT_FAIL"),
+			slog.String("commit_id", id),
+			slog.String("error", err.Error()))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	slog.InfoContext(r.Context(), "commit rejeitado",
+		slog.String("module", logModule),
+		slog.String("event_id", "COMMIT_REJECTED"),
+		slog.String("commit_id", id))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleClearFinished apaga commits received já finalizados (pulled,
+// rejected, failed) — limpa a UI mantendo só o que ainda tem ação
+// pendente (announced, pulling).
+func (s *Server) handleClearFinished(w http.ResponseWriter, r *http.Request) {
+	n, err := s.store.DeleteFinishedReceived()
+	if err != nil {
+		slog.WarnContext(r.Context(), "clear finished falhou",
+			slog.String("module", logModule),
+			slog.String("event_id", "COMMIT_CLEAR_FAIL"),
+			slog.String("error", err.Error()))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	slog.InfoContext(r.Context(), "commits finalizados apagados",
+		slog.String("module", logModule),
+		slog.String("event_id", "COMMIT_CLEAR_OK"),
+		slog.Int64("count", n))
+	writeJSON(w, http.StatusOK, map[string]int64{"removed": n})
 }
 
 func writeJSON(w http.ResponseWriter, status int, body interface{}) {

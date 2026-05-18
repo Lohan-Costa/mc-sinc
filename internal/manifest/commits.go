@@ -23,6 +23,7 @@ const (
 	CommitStatusPulling   CommitStatus = "pulling"   // pull em andamento
 	CommitStatusPulled    CommitStatus = "pulled"    // arquivos baixados e validados
 	CommitStatusFailed    CommitStatus = "failed"    // pull falhou (hash, rede, etc.)
+	CommitStatusRejected  CommitStatus = "rejected"  // usuário decidiu não baixar (recebido)
 )
 
 // Commit representa uma linha da tabela `commits`.
@@ -201,4 +202,54 @@ func (s *Store) UpdateCommitStatus(id string, status CommitStatus) error {
 		return ErrCommitNotFound
 	}
 	return nil
+}
+
+// DeleteFinishedReceived apaga commits recebidos cujo ciclo terminou
+// (pulled, rejected, failed). Mantém commits 'announced' e 'pulling'
+// — esses ainda têm ação pendente. Cascateia em commit_files via FK
+// implícita (delete manual: a tabela não declara FK, então fazemos
+// numa transação).
+//
+// Retorna o número de commits removidos.
+func (s *Store) DeleteFinishedReceived() (int64, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.Query(`
+		SELECT id FROM commits
+		WHERE direction = ? AND status IN (?, ?, ?)
+	`, string(DirectionReceived),
+		string(CommitStatusPulled),
+		string(CommitStatusRejected),
+		string(CommitStatusFailed))
+	if err != nil {
+		return 0, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	_ = rows.Close()
+
+	for _, id := range ids {
+		if _, err := tx.Exec(`DELETE FROM commit_files WHERE commit_id = ?`, id); err != nil {
+			return 0, err
+		}
+		if _, err := tx.Exec(`DELETE FROM commits WHERE id = ?`, id); err != nil {
+			return 0, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return int64(len(ids)), nil
 }

@@ -48,6 +48,23 @@
       padding: 1.25rem 1.5rem;
     }
     section.panel h2 { margin-top: 0; font-size: 1rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+    .section-header { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: .5rem; }
+    .section-header h2 { margin: 0; }
+    .section-actions { display: flex; gap: .35rem; }
+    button.ghost {
+      background: transparent; color: var(--text); border: 1px solid var(--border);
+      padding: .3rem .7rem; font-size: .8rem;
+    }
+    button.ghost.danger { color: var(--danger); border-color: rgba(248,113,113,.3); }
+    button.ghost.muted { color: var(--muted); }
+    button.ghost:hover:not(:disabled) { background: rgba(255,255,255,.04); }
+    button.reject-btn {
+      background: transparent; color: var(--danger);
+      border: 1px solid rgba(248,113,113,.3);
+      padding: .5rem 1rem; border-radius: 6px; cursor: pointer; font-size: .9rem;
+      margin-left: .35rem;
+    }
+    button.reject-btn:hover:not(:disabled) { background: rgba(248,113,113,.1); }
     .status-grid { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; font-size: .95rem; }
     .status-grid dt { color: var(--muted); }
     ul.files { list-style: none; padding: 0; margin: 0; }
@@ -133,6 +150,7 @@
     .badge.idle            { background: rgba(74,222,128,.15); color: var(--ok); }
     .badge.unknown         { background: #2a2e38; color: var(--muted); }
     .badge.disconnected    { background: rgba(248, 113, 113, .15); color: var(--danger); }
+    .badge.rejected        { background: rgba(139, 144, 156, .15); color: var(--muted); }
 
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
     .badge.pulling { animation: pulse 1.6s ease-in-out infinite; }
@@ -174,7 +192,14 @@
     </section>
 
     <section class="panel">
-      <h2 id="title-received"></h2>
+      <div class="section-header">
+        <h2 id="title-received"></h2>
+        <span class="section-actions">
+          <button id="receive-all-btn" class="ghost" hidden></button>
+          <button id="reject-all-btn" class="ghost danger" hidden></button>
+          <button id="clear-history-btn" class="ghost muted" hidden></button>
+        </span>
+      </div>
       <div class="commit-list" id="received"><div class="empty"></div></div>
     </section>
 
@@ -227,6 +252,13 @@
         downloadBtn: 'Baixar',
         downloadingBtn: 'Baixando…',
         retryBtn: 'Tentar novamente',
+        rejectBtn: 'Rejeitar',
+        receiveAllBtn: 'Receber todos',
+        rejectAllBtn: 'Rejeitar todos',
+        clearHistoryBtn: 'Limpar histórico',
+        confirmRejectAll: 'Rejeitar todos os commits aguardando?',
+        confirmClearHistory: 'Apagar commits já baixados/rejeitados/falhos?',
+        alertRejectFail: 'Falha ao rejeitar: ',
 
         // Pluralização. Recebe n; cada língua define a regra que quiser.
         fileCount: (n) => `${n} arquivo${n === 1 ? '' : 's'}`,
@@ -237,6 +269,7 @@
           pulling: 'baixando',
           pulled: 'baixado',
           failed: 'falhou',
+          rejected: 'rejeitado',
         },
         avidState: {
           busy: 'gravando',
@@ -289,6 +322,9 @@
 
       document.getElementById('message').placeholder = t.messagePlaceholder;
       document.getElementById('commit-btn').textContent = t.sendBtn;
+      document.getElementById('receive-all-btn').textContent = t.receiveAllBtn;
+      document.getElementById('reject-all-btn').textContent = t.rejectAllBtn;
+      document.getElementById('clear-history-btn').textContent = t.clearHistoryBtn;
 
       // Os <li class="empty"> e <div class="empty"> que começam vazios viram
       // "carregando…" até o primeiro refresh popular a lista de verdade.
@@ -386,6 +422,16 @@
       btn.disabled = !hasHashable;
     }
 
+    // Mostra/esconde os botões de Receber/Rejeitar Todos + Limpar Histórico
+    // baseado no que está disponível em Recebidos.
+    function updateReceivedSectionActions(received) {
+      const hasAction = received.some(c => c.status === 'announced' || c.status === 'failed');
+      const hasFinished = received.some(c => c.status === 'pulled' || c.status === 'rejected' || c.status === 'failed');
+      document.getElementById('receive-all-btn').hidden = !hasAction;
+      document.getElementById('reject-all-btn').hidden = !hasAction;
+      document.getElementById('clear-history-btn').hidden = !hasFinished;
+    }
+
     function renderAvidBadge(av) {
       if (!av || !av.state) {
         return `<span class="badge unknown">${escapeHTML(t.avidState.unknown)}</span>`;
@@ -409,11 +455,16 @@
     function renderReceivedCard(c) {
       const uiStatus = pullsInFlight.has(c.id) && c.status === 'announced' ? 'pulling' : c.status;
       const canPull = uiStatus === 'announced' || uiStatus === 'failed';
+      const canReject = uiStatus === 'announced' || uiStatus === 'failed';
       const btnLabel = uiStatus === 'failed' ? t.retryBtn : t.downloadBtn;
       const fileCount = (c.files || []).length;
       const messageHTML = c.message
         ? escapeHTML(c.message)
         : `<em class="empty">${escapeHTML(t.noMessage)}</em>`;
+
+      const rejectBtnHTML = canReject
+        ? `<button class="reject-btn" data-id="${escapeHTML(c.id)}">${escapeHTML(t.rejectBtn)}</button>`
+        : '';
 
       return `
         <article class="commit-card" data-id="${escapeHTML(c.id)}">
@@ -429,6 +480,7 @@
             <span>${escapeHTML(t.fileCount(fileCount))} · ${fmtSize(totalSize(c.files))} · ${fmtTime(c.created_at)}</span>
             <span class="actions">
               <button class="pull-btn" data-id="${escapeHTML(c.id)}" ${canPull ? '' : 'disabled'}>${escapeHTML(btnLabel)}</button>
+              ${rejectBtnHTML}
             </span>
           </div>
           <details${openDetails.has(c.id) ? ' open' : ''}>
@@ -496,6 +548,9 @@
         } else {
           receivedList.innerHTML = received.map(renderReceivedCard).join('');
         }
+        // Mostra os botões em massa apenas se houver alvos: announceds
+        // pra Receber/Rejeitar Todos; finalizados pra Limpar.
+        updateReceivedSectionActions(received || []);
 
         const sentList = document.getElementById('sent');
         if (!sent || sent.length === 0) {
@@ -593,8 +648,22 @@
     trackToggles(document.getElementById('sent'));
 
     // Delegação de evento — cards são re-renderizados a cada 4s,
-    // então não dá pra anexar listener por card direto.
+    // então não dá pra anexar listener por card direto. Trata pull e reject.
     document.getElementById('received').addEventListener('click', async (ev) => {
+      // Rejeitar individual
+      const rejectBtn = ev.target.closest('.reject-btn');
+      if (rejectBtn) {
+        const rid = rejectBtn.dataset.id;
+        if (!rid) return;
+        rejectBtn.disabled = true;
+        try {
+          const r = await fetch(`/commits/${encodeURIComponent(rid)}/reject`, { method: 'POST' });
+          if (!r.ok) alert(t.alertRejectFail + await r.text());
+        } catch (e) { alert(t.alertError + e.message); }
+        refresh();
+        return;
+      }
+
       const btn = ev.target.closest('.pull-btn');
       if (!btn || btn.disabled) return;
       const id = btn.dataset.id;
@@ -613,6 +682,36 @@
         alert(t.alertError + e.message);
         pullsInFlight.delete(id);
       }
+      refresh();
+    });
+
+    // "Receber todos" — itera DOM e clica em cada pull-btn habilitado.
+    // Mais simples que iterar o JSON: aproveita o handler de click do
+    // received que ja faz fetch + tracking de pullsInFlight.
+    document.getElementById('receive-all-btn').addEventListener('click', () => {
+      document.querySelectorAll('#received .pull-btn:not(:disabled)').forEach(b => b.click());
+    });
+
+    // "Rejeitar todos" — confirma e itera todos os reject-btn dos cards
+    // ainda em announced/failed.
+    document.getElementById('reject-all-btn').addEventListener('click', async () => {
+      if (!confirm(t.confirmRejectAll)) return;
+      const ids = Array.from(document.querySelectorAll('#received .reject-btn')).map(b => b.dataset.id);
+      for (const id of ids) {
+        try {
+          await fetch(`/commits/${encodeURIComponent(id)}/reject`, { method: 'POST' });
+        } catch (e) { /* segue rejeitando os outros */ }
+      }
+      refresh();
+    });
+
+    // "Limpar histórico" — apaga pulled/rejected/failed do manifest.
+    document.getElementById('clear-history-btn').addEventListener('click', async () => {
+      if (!confirm(t.confirmClearHistory)) return;
+      try {
+        const r = await fetch('/commits/clear', { method: 'POST' });
+        if (!r.ok) alert(t.alertError + await r.text());
+      } catch (e) { alert(t.alertError + e.message); }
       refresh();
     });
 

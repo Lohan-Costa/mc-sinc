@@ -335,6 +335,70 @@ func TestHandleUnstageVoltaParaDiscovered(t *testing.T) {
 	}
 }
 
+func TestHandleRejectMudaStatus(t *testing.T) {
+	e := newTestEnv(t)
+	must(t, e.store.SaveCommit(manifest.Commit{
+		ID:        "c-rej",
+		Author:    "bob",
+		Direction: manifest.DirectionReceived,
+		Status:    manifest.CommitStatusAnnounced,
+		Files:     []manifest.CommitFile{{Path: "1/x.mxf", Hash: "h", Size: 1}},
+	}))
+
+	rr := e.request(t, "POST", "/commits/c-rej/reject", nil)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("code=%d, body=%s", rr.Code, rr.Body.String())
+	}
+
+	got, err := e.store.GetCommit("c-rej")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != manifest.CommitStatusRejected {
+		t.Errorf("status=%q, esperava rejected", got.Status)
+	}
+}
+
+func TestHandleClearApagaFinalizados(t *testing.T) {
+	e := newTestEnv(t)
+	// 3 cenários: announced (mantém), pulled (apaga), rejected (apaga)
+	statuses := map[string]manifest.CommitStatus{
+		"c-keep":   manifest.CommitStatusAnnounced,
+		"c-pulled": manifest.CommitStatusPulled,
+		"c-rej":    manifest.CommitStatusRejected,
+		"c-fail":   manifest.CommitStatusFailed,
+	}
+	for id, st := range statuses {
+		must(t, e.store.SaveCommit(manifest.Commit{
+			ID: id, Author: "bob",
+			Direction: manifest.DirectionReceived,
+			Status:    st,
+			Files:     []manifest.CommitFile{{Path: "1/x.mxf", Hash: "h", Size: 1}},
+		}))
+	}
+
+	rr := e.request(t, "POST", "/commits/clear", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code=%d, body=%s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]int64
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	if resp["removed"] != 3 {
+		t.Errorf("removed=%d, esperava 3", resp["removed"])
+	}
+
+	// announced sobrevive
+	if _, err := e.store.GetCommit("c-keep"); err != nil {
+		t.Errorf("c-keep deveria continuar; got %v", err)
+	}
+	// outros sumiram
+	for _, id := range []string{"c-pulled", "c-rej", "c-fail"} {
+		if _, err := e.store.GetCommit(id); err == nil {
+			t.Errorf("%s deveria ter sido apagado", id)
+		}
+	}
+}
+
 func TestHandlePullDevolve202EchamaTransport(t *testing.T) {
 	e := newTestEnv(t)
 	must(t, e.store.SaveCommit(manifest.Commit{
