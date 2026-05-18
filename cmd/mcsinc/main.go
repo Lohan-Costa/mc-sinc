@@ -243,7 +243,11 @@ func run() error {
 			slog.String("event_id", "AUTOMODE_DISABLED"))
 	}
 
-	// Drena eventos do watcher e os registra como `discovered` no manifest.
+	// Drena eventos do watcher e os registra no manifest via UpsertObserved.
+	// Diferença pra Upsert genérico: preserva o hash existente quando o
+	// mtime não mudou (evita re-hash desnecessário a cada startup), e
+	// invalida o hash quando o mtime difere (.mdb/.pmr são reescritos
+	// pelo Avid — precisam ser re-hashados pra refletir o conteúdo novo).
 	go func() {
 		for ev := range w.Events {
 			rel, _ := filepath.Rel(*root, ev.Path)
@@ -251,12 +255,7 @@ func run() error {
 			if err != nil {
 				continue
 			}
-			_ = store.Upsert(manifest.File{
-				Path:       rel,
-				Size:       info.Size(),
-				ModifiedAt: info.ModTime(),
-				Status:     manifest.StatusDiscovered,
-			})
+			_ = store.UpsertObserved(rel, info.Size(), info.ModTime(), manifest.StatusDiscovered)
 			slog.Info("arquivo descoberto pelo watcher",
 				slog.String("module", "watcher"),
 				slog.String("event_id", "FILE_DISCOVERED"),

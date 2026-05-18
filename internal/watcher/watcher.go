@@ -76,7 +76,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			if !isMXF(ev.Name) {
+			if !isAvidMediaFile(ev.Name) {
 				continue
 			}
 			w.schedule(ev)
@@ -126,13 +126,21 @@ func (w *Watcher) emitExisting() {
 			continue
 		}
 		name := filepath.Join(w.root, e.Name())
-		if !isMXF(name) {
+		if !isAvidMediaFile(name) {
 			continue
 		}
 		w.Events <- Event{Path: name, Op: fsnotify.Create, At: time.Now()}
 	}
 }
 
-func isMXF(path string) bool {
-	return strings.EqualFold(filepath.Ext(path), ".mxf")
+// isAvidMediaFile aceita as 3 extensões que o Avid mantém na pasta MXF/<N>/:
+//   - .mxf: as mídias propriamente ditas (imutáveis após captura).
+//   - .mdb: msmMMOB.mdb, o índice que o Avid usa pra enxergar a pasta.
+//   - .pmr: msmFMID.pmr, a tabela de referência de mídia.
+//
+// .mdb e .pmr são atualizados pelo Avid toda vez que algo muda na pasta —
+// precisam viajar junto com .mxf pra que o peer enxergue as mídias.
+func isAvidMediaFile(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	return ext == ".mxf" || ext == ".mdb" || ext == ".pmr"
 }

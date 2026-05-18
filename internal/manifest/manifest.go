@@ -125,6 +125,31 @@ func (s *Store) Upsert(f File) error {
 	return err
 }
 
+// UpsertObserved é o caminho do drainer do watcher: registra que um arquivo
+// foi visto no disco, com tamanho e mtime. Preserva o hash existente quando
+// o mtime é o mesmo (arquivo não mudou, hasher não precisa recomputar),
+// e **invalida** o hash quando o mtime difere (arquivo foi reescrito —
+// caso típico do msmMMOB.mdb que o Avid atualiza repetidamente).
+//
+// Status segue a regra: novos arquivos viram `discovered`; arquivos já
+// existentes mantêm o status atual (não regride staged/committed pra
+// discovered só porque o watcher emitiu evento de novo).
+func (s *Store) UpsertObserved(path string, size int64, modifiedAt time.Time, defaultStatus Status) error {
+	_, err := s.db.Exec(`
+		INSERT INTO files (path, hash, size, modified_at, status, updated_at)
+		VALUES (?, '', ?, ?, ?, ?)
+		ON CONFLICT(path) DO UPDATE SET
+			size        = excluded.size,
+			modified_at = excluded.modified_at,
+			updated_at  = excluded.updated_at,
+			hash = CASE
+				WHEN files.modified_at = excluded.modified_at THEN files.hash
+				ELSE ''
+			END
+	`, path, size, modifiedAt.Unix(), string(defaultStatus), time.Now().Unix())
+	return err
+}
+
 // ByStatus lista os arquivos num determinado status.
 func (s *Store) ByStatus(st Status) ([]File, error) {
 	rows, err := s.db.Query(`

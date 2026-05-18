@@ -17,6 +17,56 @@ func openTestStore(t *testing.T) *Store {
 	return store
 }
 
+// UpsertObserved deve PRESERVAR o hash se mtime nao mudou e INVALIDAR
+// se mtime difere. Crucial pro .mdb/.pmr que o Avid reescreve.
+func TestUpsertObservedPreservaHashEmMtimeIgual(t *testing.T) {
+	store := openTestStore(t)
+	t0 := time.Unix(1700000000, 0) // mtime estavel
+
+	// 1. Registra como observed (hash="").
+	if err := store.UpsertObserved("1/clip.mxf", 100, t0, StatusDiscovered); err != nil {
+		t.Fatal(err)
+	}
+	// 2. Hasher grava o hash.
+	if err := store.SetHash("1/clip.mxf", "deadbeef00000001", t0); err != nil {
+		t.Fatal(err)
+	}
+	// 3. Watcher re-emite com MESMO mtime (caso do emitExisting no startup).
+	if err := store.UpsertObserved("1/clip.mxf", 100, t0, StatusDiscovered); err != nil {
+		t.Fatal(err)
+	}
+
+	files, _ := store.ByStatus(StatusDiscovered)
+	if len(files) != 1 {
+		t.Fatalf("files=%v", files)
+	}
+	if files[0].Hash != "deadbeef00000001" {
+		t.Errorf("hash perdido apos UpsertObserved com mtime igual: %q", files[0].Hash)
+	}
+}
+
+func TestUpsertObservedInvalidaHashEmMtimeDiferente(t *testing.T) {
+	store := openTestStore(t)
+	t0 := time.Unix(1700000000, 0)
+	t1 := time.Unix(1700000099, 0) // Avid reescreveu .mdb depois
+
+	if err := store.UpsertObserved("1/msmMMOB.mdb", 200, t0, StatusDiscovered); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetHash("1/msmMMOB.mdb", "oldhash", t0); err != nil {
+		t.Fatal(err)
+	}
+	// Watcher detecta mudanca: chama UpsertObserved com mtime novo.
+	if err := store.UpsertObserved("1/msmMMOB.mdb", 250, t1, StatusDiscovered); err != nil {
+		t.Fatal(err)
+	}
+
+	files, _ := store.ByStatus(StatusDiscovered)
+	if files[0].Hash != "" {
+		t.Errorf("hash deveria ter sido invalidado em mtime novo; got %q", files[0].Hash)
+	}
+}
+
 func TestUpsertAndByStatus(t *testing.T) {
 	store := openTestStore(t)
 
