@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -46,6 +47,14 @@ type Server struct {
 	transport   transport.Transport
 	web         fs.FS
 	avidProcess string
+
+	// lifecycle é o ctx que os handlers usam pra spawnar goroutines de
+	// background (fan-out de Send, Pull). É cancelado pelo caller no
+	// shutdown — as goroutines em curso abortam graciosamente em vez de
+	// virar zumbi. wg permite o caller esperar todas terminarem antes
+	// de fechar o store.
+	lifecycle context.Context
+	wg        sync.WaitGroup
 }
 
 // Config agrupa as dependências necessárias para construir o Server.
@@ -59,10 +68,19 @@ type Config struct {
 	Transport   transport.Transport
 	Web         fs.FS // sistema de arquivos com a UI (`web/`)
 	AvidProcess string // nome do processo do Avid pra detecção (ex: "Avid Media Composer")
+
+	// Lifecycle: ctx que controla as goroutines de fan-out. Quando
+	// cancelado, Send/Pull em curso abortam. Opcional — default é
+	// context.Background() (goroutines rodam até completar).
+	Lifecycle context.Context
 }
 
 // New monta o servidor.
 func New(cfg Config) *Server {
+	lifecycle := cfg.Lifecycle
+	if lifecycle == nil {
+		lifecycle = context.Background()
+	}
 	return &Server{
 		user:        cfg.User,
 		root:        cfg.Root,
@@ -73,6 +91,26 @@ func New(cfg Config) *Server {
 		transport:   cfg.Transport,
 		web:         cfg.Web,
 		avidProcess: cfg.AvidProcess,
+		lifecycle:   lifecycle,
+	}
+}
+
+// Wait bloqueia até todas as goroutines de fan-out terminarem ou o ctx
+// passado expirar. Deve ser chamado pelo main durante o shutdown,
+// depois de httpSrv.Shutdown — assim os requests em voo terminam,
+// e as goroutines de background que eles dispararam têm chance de
+// fechar (anúncios pendentes, pulls em curso).
+func (s *Server) Wait(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -232,11 +270,15 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fan-out aos peers em background — o commit local não espera a rede.
+	// Usa s.lifecycle pra que o shutdown cancele anúncios pendentes;
+	// s.wg permite o main esperar todas terminarem antes de fechar o store.
 	// Propaga o op_id do request original pro background goroutine.
 	if s.transport != nil {
 		opID, _ := logpkg.OpFromContext(r.Context())
+		s.wg.Add(1)
 		go func() {
-			bgCtx := context.Background()
+			defer s.wg.Done()
+			bgCtx := s.lifecycle
 			if opID != "" {
 				bgCtx = logpkg.WithOp(bgCtx, opID)
 			}
@@ -274,10 +316,13 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no transport configured", http.StatusServiceUnavailable)
 		return
 	}
-	// Pull pode demorar — roda em background, devolve 202.
+	// Pull pode demorar — roda em background, devolve 202. Usa
+	// s.lifecycle/s.wg como o handleCommit pra coordenação com shutdown.
 	opID, _ := logpkg.OpFromContext(r.Context())
+	s.wg.Add(1)
 	go func() {
-		bgCtx := context.Background()
+		defer s.wg.Done()
+		bgCtx := s.lifecycle
 		if opID != "" {
 			bgCtx = logpkg.WithOp(bgCtx, opID)
 		}

@@ -140,6 +140,9 @@ func run() error {
 		return err
 	}
 
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
 	srv := api.New(api.Config{
 		User:        *user,
 		Root:        *root,
@@ -150,10 +153,8 @@ func run() error {
 		Transport:   tport,
 		Web:         webRoot,
 		AvidProcess: *avidProcess,
+		Lifecycle:   ctx, // cancela fan-outs de background no shutdown
 	})
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 
 	httpSrv := &http.Server{
 		Addr:              ":" + strconv.Itoa(*port),
@@ -242,6 +243,16 @@ func run() error {
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelShutdown()
 	_ = httpSrv.Shutdown(shutdownCtx)
+
+	// Espera as goroutines de fan-out (transport.Send/Pull em background)
+	// terminarem antes do defer fechar o store. Se estourarem o timeout,
+	// é warning — store.Close vai rodar de qualquer jeito.
+	if err := srv.Wait(shutdownCtx); err != nil {
+		slog.Warn("goroutines de fan-out nao terminaram dentro do timeout",
+			slog.String("module", "main"),
+			slog.String("event_id", "SHUTDOWN_TIMEOUT"),
+			slog.String("error", err.Error()))
+	}
 
 	return runErr
 }
