@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -154,7 +155,7 @@ func (t *Transport) handleFile(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	if info != nil {
-		w.Header().Set("Content-Length", itoa64(info.Size()))
+		w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
 	}
 	http.ServeContent(w, r, filepath.Base(rel), info.ModTime(), f)
 }
@@ -168,24 +169,3 @@ func remoteHost(r *http.Request) string {
 	return r.RemoteAddr
 }
 
-func itoa64(n int64) string {
-	if n == 0 {
-		return "0"
-	}
-	var b [20]byte
-	pos := len(b)
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	for n > 0 {
-		pos--
-		b[pos] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		pos--
-		b[pos] = '-'
-	}
-	return string(b[pos:])
-}

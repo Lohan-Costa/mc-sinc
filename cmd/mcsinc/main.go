@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -146,7 +147,7 @@ func main() {
 	defer cancel()
 
 	httpSrv := &http.Server{
-		Addr:              ":" + itoa(*port),
+		Addr:              ":" + strconv.Itoa(*port),
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
@@ -300,25 +301,3 @@ func lastMDBLabel(t time.Time) string {
 	return t.Format(time.RFC3339)
 }
 
-// itoa local para não precisar de strconv só pra isso.
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var b [12]byte
-	pos := len(b)
-	neg := i < 0
-	if neg {
-		i = -i
-	}
-	for i > 0 {
-		pos--
-		b[pos] = byte('0' + i%10)
-		i /= 10
-	}
-	if neg {
-		pos--
-		b[pos] = '-'
-	}
-	return string(b[pos:])
-}
