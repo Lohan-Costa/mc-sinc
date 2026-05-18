@@ -329,6 +329,65 @@ func TestHandleAnnounceNormalizesBackslashPath(t *testing.T) {
 	}
 }
 
+// Pull deve abortar quando o peer abre a conexao mas nunca envia
+// headers (peer cai/trava no meio). Sem ResponseHeaderTimeout, o
+// io.Copy ficaria pendurado para sempre e o status do commit nunca
+// avancaria de "pulling".
+func TestPullAbortaEmPeerLento(t *testing.T) {
+	bob := newNode(t, "bob")
+
+	// "Alice" é um servidor que aceita a conexao e nunca responde.
+	// Cleanups sao LIFO: registramos slowAlice.Close PRIMEIRO e cancel
+	// DEPOIS, pra que cancel rode primeiro (desbloqueia o handler) e
+	// slowAlice.Close consiga retornar.
+	hangCtx, cancelHang := context.WithCancel(context.Background())
+	slowAlice := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-hangCtx.Done() // bloqueia até o cleanup chamar cancelHang
+	}))
+	t.Cleanup(slowAlice.Close)
+	t.Cleanup(cancelHang)
+	slowAddr, _ := url.Parse(slowAlice.URL)
+
+	// Salva no Bob um commit received com PeerAddr apontando pro slow.
+	c := &commit.Commit{
+		ID:        "01020304abcdef00",
+		Author:    "alice",
+		Files: []commit.FileSpec{
+			{Path: "1/clip.mxf", Hash: "deadbeef00000001", Size: 6},
+		},
+		CreatedAt: time.Now(),
+	}
+	if err := bob.store.SaveCommit(manifest.Commit{
+		ID:        c.ID,
+		Author:    "alice",
+		Direction: manifest.DirectionReceived,
+		Status:    manifest.CommitStatusAnnounced,
+		PeerAddr:  slowAddr.Host,
+		Files:     []manifest.CommitFile{{Path: c.Files[0].Path, Hash: c.Files[0].Hash, Size: c.Files[0].Size}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bob.tport.discov = &stubPeers{list: []transport.Peer{{ID: "alice", Addr: slowAddr.Host}}}
+
+	// Recria o Bob com timeout curto pra esse teste — o newNode usa o default 30s.
+	fastTimeoutTport := NewWithHeaderTimeout(bob.user, 0, bob.root, bob.store, bob.tport.discov, 100*time.Millisecond)
+
+	start := time.Now()
+	// Pull retorna nil mesmo com anyFailed=true; o que importa eh status.
+	_ = fastTimeoutTport.Pull(context.Background(), c.ID)
+	elapsed := time.Since(start)
+
+	if elapsed > 2*time.Second {
+		t.Errorf("Pull demorou %v — timeout nao cortou rapido", elapsed)
+	}
+
+	// Status final deve ser failed (anyFailed=true depois do timeout).
+	got, _ := bob.store.GetCommit(c.ID)
+	if got.Status != manifest.CommitStatusFailed {
+		t.Errorf("status=%q, esperava failed", got.Status)
+	}
+}
+
 // pullOne deve usar o basename limpo (sem prefixo de pasta) mesmo se
 // o f.Path carregar backslash. Cobre estado pós-bug em manifest legado
 // que ainda guarda "1\cena.mxf".

@@ -49,17 +49,35 @@ type Transport struct {
 	httpClient *http.Client
 }
 
+// DefaultPullHeaderTimeout: quanto o cliente espera por response headers
+// antes de abortar um fetch. Sem isso, peers que sumiram da rede deixavam
+// pulls pendurados em "baixando" para sempre. Body streaming não tem
+// timeout — arquivos de mídia podem ser grandes em LAN saturada.
+const DefaultPullHeaderTimeout = 30 * time.Second
+
 // New configura uma instância LAN.
 // `root` é a raiz MXF do Avid (mesma de --root); usada pra resolver paths
 // físicos quando o peer pede arquivos via /peer/files.
 func New(user string, port int, root string, store *manifest.Store, disc PeerSource) *Transport {
+	return NewWithHeaderTimeout(user, port, root, store, disc, DefaultPullHeaderTimeout)
+}
+
+// NewWithHeaderTimeout é como New mas permite injetar o header timeout —
+// útil em testes que precisam de timeout curto pra exercitar peer offline
+// sem esperar 30s.
+func NewWithHeaderTimeout(user string, port int, root string, store *manifest.Store, disc PeerSource, headerTimeout time.Duration) *Transport {
 	return &Transport{
-		user:       user,
-		port:       port,
-		root:       root,
-		store:      store,
-		discov:     disc,
-		httpClient: &http.Client{Timeout: 0}, // streaming; sem timeout global
+		user:   user,
+		port:   port,
+		root:   root,
+		store:  store,
+		discov: disc,
+		httpClient: &http.Client{
+			Timeout: 0, // streaming; body sem timeout global
+			Transport: &http.Transport{
+				ResponseHeaderTimeout: headerTimeout,
+			},
+		},
 	}
 }
 
