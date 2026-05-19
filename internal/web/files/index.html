@@ -105,6 +105,18 @@
       border-radius: 6px; color: var(--warn); font-size: .9rem;
     }
     #root-edit-btn { margin-left: .5rem; font-size: .75rem; padding: .15rem .5rem; }
+    .peer-pill {
+      display: inline-flex; align-items: center; gap: .25rem;
+      background: rgba(78, 161, 255, .12); border: 1px solid rgba(78, 161, 255, .25);
+      padding: .15rem .5rem; border-radius: 999px; font-size: .85rem;
+      margin-right: .3rem;
+    }
+    .peer-pill .sync-btn {
+      background: transparent; color: var(--accent); border: 0;
+      padding: 0; font-size: 1rem; cursor: pointer; line-height: 1;
+    }
+    .peer-pill .sync-btn:hover { filter: brightness(1.3); }
+    .peer-pill .sync-btn:disabled { opacity: .4; cursor: wait; }
     .status-grid { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; font-size: .95rem; }
     .status-grid dt { color: var(--muted); }
     ul.files { list-style: none; padding: 0; margin: 0; }
@@ -336,6 +348,10 @@
         browseStatusInvalid: 'Esta pasta não é uma Avid MediaFiles válida.',
         browseStatusReady: '✓ Avid MediaFiles válida — pode selecionar.',
         browseStatusListing: 'carregando…',
+        syncWithBtn: 'Sincronizar com esta ilha',
+        syncDispatched: (n, peer) => `Sincronização iniciada com ${peer} (${n} arquivos).`,
+        syncNothingToDo: (peer) => `${peer} já tem tudo — nada a sincronizar.`,
+        alertSyncFail: 'Falha ao sincronizar: ',
 
         // Pluralização. Recebe n; cada língua define a regra que quiser.
         fileCount: (n) => `${n} arquivo${n === 1 ? '' : 's'}`,
@@ -499,6 +515,18 @@
       </li>`;
     }
 
+    // renderPeerPills lista cada peer conectado com botão "Sincronizar"
+    // — dispara POST /sync-with/<peer> que monta delta + envia direcionado.
+    function renderPeerPills(peers) {
+      if (!peers || peers.length === 0) return escapeHTML(t.nobodyConnected);
+      return peers.map(p => `
+        <span class="peer-pill">
+          ${escapeHTML(p)}
+          <button class="sync-btn" data-peer="${escapeHTML(p)}" title="${escapeHTML(t.syncWithBtn)}">⟲</button>
+        </span>
+      `).join(' ');
+    }
+
     // updateCommitBtnState habilita "Enviar pasta" quando há pelo menos 1
     // arquivo com hash calculado (algo pra mandar). Backend tem o mesmo gate.
     function updateCommitBtnState(pending) {
@@ -608,8 +636,7 @@
         document.getElementById('user').textContent = status.user;
         document.getElementById('user-badge').textContent = '@' + status.user;
         document.getElementById('root').textContent = status.root;
-        document.getElementById('peers').textContent =
-          (status.peers && status.peers.length) ? status.peers.join(', ') : t.nobodyConnected;
+        document.getElementById('peers').innerHTML = renderPeerPills(status.peers);
         document.getElementById('avid').innerHTML = renderAvidBadge(status.avid);
 
         const pendingList = document.getElementById('pending');
@@ -896,6 +923,34 @@
       statusEl.className = 'browse-status ok';
       statusEl.textContent = t.browseStatusReady;
     }
+
+    // Sync com peer especifico: dispara POST /sync-with/<peer>.
+    // Delegacao porque a lista de peers é re-renderizada a cada refresh.
+    document.getElementById('peers').addEventListener('click', async (ev) => {
+      const btn = ev.target.closest('.sync-btn');
+      if (!btn || btn.disabled) return;
+      const peer = btn.dataset.peer;
+      if (!peer) return;
+      btn.disabled = true;
+      try {
+        const r = await fetch(`/sync-with/${encodeURIComponent(peer)}`, { method: 'POST' });
+        if (!r.ok) {
+          alert(t.alertSyncFail + await r.text());
+          return;
+        }
+        const resp = await r.json();
+        if (resp.committed) {
+          alert(t.syncDispatched(resp.delta, peer));
+        } else {
+          alert(t.syncNothingToDo(peer));
+        }
+      } catch (e) {
+        alert(t.alertError + e.message);
+      } finally {
+        btn.disabled = false;
+      }
+      refresh();
+    });
 
     document.getElementById('root-edit-btn').addEventListener('click', openBrowseModal);
     document.getElementById('browse-cancel').addEventListener('click', closeBrowseModal);

@@ -124,32 +124,57 @@ func (t *Transport) Send(ctx context.Context, c *commit.Commit) error {
 		wg.Add(1)
 		go func(peer transport.Peer) {
 			defer wg.Done()
-			// Cria um op_id por peer pra permitir correlação cross-host.
-			peerCtx, opID := logpkg.NewOp(ctx)
-			slog.InfoContext(peerCtx, "iniciando announce para peer",
-				slog.String("module", logModule),
-				slog.String("event_id", "ANNOUNCE_START"),
-				slog.String("commit_id", c.ID),
-				slog.String("peer_id", peer.ID),
-				slog.String("peer_addr", peer.Addr))
-			if err := t.announce(peerCtx, peer, c, opID); err != nil {
-				slog.ErrorContext(peerCtx, "announce falhou",
-					slog.String("module", logModule),
-					slog.String("event_id", "ANNOUNCE_FAIL"),
-					slog.String("commit_id", c.ID),
-					slog.String("peer_id", peer.ID),
-					slog.String("error", err.Error()))
-				return
-			}
-			slog.InfoContext(peerCtx, "announce concluído",
-				slog.String("module", logModule),
-				slog.String("event_id", "ANNOUNCE_OK"),
-				slog.String("commit_id", c.ID),
-				slog.String("peer_id", peer.ID))
+			t.announceTo(ctx, peer, c)
 		}(p)
 	}
 	wg.Wait()
 	return nil
+}
+
+// SendTo anuncia o commit pra UM peer específico. Usado pelo handler
+// /sync-with — sender já decidiu qual peer recebe.
+func (t *Transport) SendTo(ctx context.Context, peer transport.Peer, c *commit.Commit) error {
+	if peer.Addr == "" {
+		return fmt.Errorf("peer %s sem Addr — discovery não populou", peer.ID)
+	}
+	t.announceTo(ctx, peer, c)
+	return nil
+}
+
+// announceTo é o caminho comum de Send/SendTo: cria op_id, faz POST,
+// loga sucesso/falha.
+func (t *Transport) announceTo(ctx context.Context, peer transport.Peer, c *commit.Commit) {
+	peerCtx, opID := logpkg.NewOp(ctx)
+	slog.InfoContext(peerCtx, "iniciando announce para peer",
+		slog.String("module", logModule),
+		slog.String("event_id", "ANNOUNCE_START"),
+		slog.String("commit_id", c.ID),
+		slog.String("peer_id", peer.ID),
+		slog.String("peer_addr", peer.Addr))
+	if err := t.announce(peerCtx, peer, c, opID); err != nil {
+		slog.ErrorContext(peerCtx, "announce falhou",
+			slog.String("module", logModule),
+			slog.String("event_id", "ANNOUNCE_FAIL"),
+			slog.String("commit_id", c.ID),
+			slog.String("peer_id", peer.ID),
+			slog.String("error", err.Error()))
+		return
+	}
+	slog.InfoContext(peerCtx, "announce concluído",
+		slog.String("module", logModule),
+		slog.String("event_id", "ANNOUNCE_OK"),
+		slog.String("commit_id", c.ID),
+		slog.String("peer_id", peer.ID))
+}
+
+// Inventory consulta o /peer/inventory do peer remoto pra saber o que
+// ele tem na pasta `1-<requestingUser>/`. Usado pelo handler /sync-with
+// pra montar lista delta antes de enviar.
+func (t *Transport) Inventory(ctx context.Context, peer transport.Peer, requestingUser string) ([]transport.InventoryItem, error) {
+	if peer.Addr == "" {
+		return nil, fmt.Errorf("peer %s sem Addr — discovery não populou", peer.ID)
+	}
+	return t.fetchInventory(ctx, peer.Addr, requestingUser)
 }
 
 // Pull baixa os arquivos de um commit recebido. Para cada file:

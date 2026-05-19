@@ -45,6 +45,43 @@ func TestUpsertObservedPreservaHashEmMtimeIgual(t *testing.T) {
 	}
 }
 
+func TestFilesUnderPrefixSeparaPastas(t *testing.T) {
+	store := openTestStore(t)
+	t0 := time.Unix(1700000000, 0)
+	// "1/" = pasta propria; "1-alice/" = recebido do alice;
+	// "1-bob/" = recebido do bob. Prefix com / final evita falso match.
+	for _, f := range []struct {
+		path   string
+		status Status
+	}{
+		{"1/own.mxf", StatusDiscovered},
+		{"1/own2.mxf", StatusCommitted},
+		{"1-alice/clip.mxf", StatusReceived},
+		{"1-alice/sub.mxf", StatusReceived},
+		{"1-bob/cena.mxf", StatusReceived},
+	} {
+		if err := store.Upsert(File{Path: f.path, Status: f.status, ModifiedAt: t0}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cases := map[string]int{
+		"1/":       2, // só os próprios
+		"1-alice/": 2,
+		"1-bob/":   1,
+		"1-zoe/":   0,
+	}
+	for prefix, want := range cases {
+		got, err := store.FilesUnderPrefix(prefix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != want {
+			t.Errorf("prefix=%q: got %d files, want %d", prefix, len(got), want)
+		}
+	}
+}
+
 func TestDeleteRemovePath(t *testing.T) {
 	store := openTestStore(t)
 	t0 := time.Unix(1700000000, 0)

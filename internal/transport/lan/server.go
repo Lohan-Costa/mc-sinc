@@ -15,6 +15,7 @@ import (
 	"github.com/Lohan-Costa/mc-sinc/internal/commit"
 	logpkg "github.com/Lohan-Costa/mc-sinc/internal/logging"
 	"github.com/Lohan-Costa/mc-sinc/internal/manifest"
+	"github.com/Lohan-Costa/mc-sinc/internal/transport"
 )
 
 // Routes constrói o subrouter HTTP exposto aos peers.
@@ -23,7 +24,56 @@ func (t *Transport) Routes() chi.Router {
 	r := chi.NewRouter()
 	r.Post("/commits", t.handleAnnounce)
 	r.Get("/files/{id}/*", t.handleFile)
+	r.Get("/inventory", t.handleInventory)
 	return r
+}
+
+// handleInventory devolve os arquivos .mxf que esse peer tem na pasta
+// `1-<requesting_user>/`. Usado pelo sender (peer A) pra montar lista
+// delta antes de mandar sync.
+//
+// Query: ?user=<requesting_user>. Sem user, devolve 400.
+// Resposta: JSON array de InventoryItem.
+func (t *Transport) handleInventory(w http.ResponseWriter, r *http.Request) {
+	user := strings.TrimSpace(r.URL.Query().Get("user"))
+	if user == "" {
+		http.Error(w, "query 'user' required", http.StatusBadRequest)
+		return
+	}
+	prefix := "1-" + user + "/"
+	files, err := t.store.FilesUnderPrefix(prefix)
+	if err != nil {
+		slog.WarnContext(r.Context(), "inventory: falha lendo manifest",
+			slog.String("module", logModule),
+			slog.String("event_id", "INVENTORY_LIST_FAIL"),
+			slog.String("prefix", prefix),
+			slog.String("error", err.Error()))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	items := make([]transport.InventoryItem, 0, len(files))
+	for _, f := range files {
+		// Inventário cobre só .mxf — .mdb/.pmr sempre são re-enviados
+		// (Avid atualiza constantemente, comparar hash não economiza).
+		if !strings.EqualFold(filepath.Ext(f.Path), ".mxf") {
+			continue
+		}
+		if f.Hash == "" {
+			continue // arquivo ainda não hashado — peer A não consegue comparar
+		}
+		items = append(items, transport.InventoryItem{
+			Path: strings.ReplaceAll(f.Path, `\`, "/"),
+			Hash: f.Hash,
+			Size: f.Size,
+		})
+	}
+	slog.InfoContext(r.Context(), "inventory respondido",
+		slog.String("module", logModule),
+		slog.String("event_id", "INVENTORY_OK"),
+		slog.String("requesting_user", user),
+		slog.Int("count", len(items)))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(items)
 }
 
 // handleAnnounce recebe um anúncio de commit de outro peer e persiste como

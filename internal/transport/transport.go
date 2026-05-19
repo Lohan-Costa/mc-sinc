@@ -21,6 +21,14 @@ type Peer struct {
 	Version string // versão do MC Sinc do peer
 }
 
+// InventoryItem descreve um arquivo que um peer tem em sua pasta
+// `1-<requesting_user>/`. Devolvido por /peer/inventory.
+type InventoryItem struct {
+	Path string `json:"path"` // forward slash, relativo à raiz MXF do peer (ex: "1-alice/clip.mxf")
+	Hash string `json:"hash"`
+	Size int64  `json:"size"`
+}
+
 // Transport é o contrato comum entre LAN, WAN, etc.
 //
 // O modelo é pull explícito: Send anuncia metadata aos peers; bytes só
@@ -31,10 +39,19 @@ type Transport interface {
 	// Falhas individuais por peer não fazem o commit local falhar.
 	Send(ctx context.Context, c *commit.Commit) error
 
+	// SendTo é como Send mas anuncia pra UM peer específico — usado pelo
+	// "Sincronizar com X" da UI pra mandar um commit delta direcionado.
+	SendTo(ctx context.Context, peer Peer, c *commit.Commit) error
+
 	// Pull baixa os arquivos de um commit recebido. Itera commit_files,
 	// faz fetch byte-streamed do sender, verifica xxhash64 e grava no disco
 	// local sob `MXF/1-<author>/<filename>`.
 	Pull(ctx context.Context, commitID string) error
+
+	// Inventory pergunta a um peer o que ele tem na pasta
+	// `1-<requestingUser>/`. Sender usa pra montar lista delta antes de
+	// criar um sync commit.
+	Inventory(ctx context.Context, peer Peer, requestingUser string) ([]InventoryItem, error)
 
 	// ListPeers devolve os peers vistos no momento.
 	ListPeers(ctx context.Context) ([]Peer, error)

@@ -110,6 +110,14 @@ func (s *Service) Commit(ctx context.Context, message string) (*Commit, error) {
 	}, nil
 }
 
+// NewID gera um identificador opaco (16 chars hex) pra commit. Exportado
+// pra permitir que callers fora deste pacote (ex: api.handleSyncWith)
+// montem commits delta sem passar pelo Service.Commit (que consome
+// staged/discovered do manifest).
+func NewID() string {
+	return newID()
+}
+
 func newID() string {
 	var b [8]byte
 	_, _ = rand.Read(b[:])

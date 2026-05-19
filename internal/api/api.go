@@ -23,6 +23,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -181,6 +182,7 @@ func (s *Server) Handler() http.Handler {
 	r.Post("/config", s.handlePostConfig)
 	r.Get("/fs/browse", s.handleFsBrowse)
 	r.Post("/config/select-avid", s.handleSelectAvid)
+	r.Post("/sync-with/{peer_id}", s.handleSyncWith)
 
 	if s.transport != nil {
 		r.Mount("/peer", s.transport.Routes())
@@ -518,6 +520,163 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 		slog.String("new_root", req.Root))
 	writeJSON(w, http.StatusOK, map[string]string{
 		"message": "Config salvo. Reinicie o MC Sinc para aplicar.",
+	})
+}
+
+// handleSyncWith orquestra sincronização manual entre o sender (este
+// peer) e um peer específico. Fluxo:
+//
+//  1. Resolve peer_id no cache de discovery.
+//  2. GET /peer/inventory?user=<my-user> no peer — recebe o que ele
+//     tem em `1-<my-user>/`.
+//  3. Lista files locais em `1/` com hash. Pra cada um:
+//     - se é .mdb / .pmr: SEMPRE inclui (Avid atualiza, hash velho
+//       não vale comparar).
+//     - se é .mxf: inclui só se o hash não está no inventário remoto.
+//  4. Se delta vazio: devolve 200 "ja em sync".
+//  5. Senão: monta commit.Commit + persiste como sent + transport.SendTo
+//     pra ESSE peer (não broadcast).
+func (s *Server) handleSyncWith(w http.ResponseWriter, r *http.Request) {
+	peerID := chi.URLParam(r, "peer_id")
+	if peerID == "" {
+		http.Error(w, "peer_id required", http.StatusBadRequest)
+		return
+	}
+	if s.discovery == nil || s.transport == nil {
+		http.Error(w, "discovery/transport indisponiveis", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Resolve peer no cache de discovery (lista atual de peers vivos).
+	var target *transport.Peer
+	for _, p := range s.discovery.Peers() {
+		if p.ID == peerID {
+			pCopy := p
+			target = &pCopy
+			break
+		}
+	}
+	if target == nil {
+		http.Error(w, "peer offline ou desconhecido", http.StatusNotFound)
+		return
+	}
+
+	// Consulta inventário do peer.
+	inv, err := s.transport.Inventory(r.Context(), *target, s.user)
+	if err != nil {
+		slog.WarnContext(r.Context(), "Inventory falhou",
+			slog.String("module", logModule),
+			slog.String("event_id", "SYNC_INVENTORY_FAIL"),
+			slog.String("peer_id", peerID),
+			slog.String("error", err.Error()))
+		http.Error(w, "inventory: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	remoteHashes := make(map[string]struct{}, len(inv))
+	for _, i := range inv {
+		remoteHashes[i.Hash] = struct{}{}
+	}
+
+	// Files locais em "1/" — só os próprios, sem 1-<sender>/.
+	local, err := s.store.FilesUnderPrefix("1/")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	delta := make([]commit.FileSpec, 0, len(local))
+	for _, f := range local {
+		if f.Hash == "" {
+			continue // ainda não hashado — entra no próximo sync
+		}
+		base := strings.ToLower(filepath.Base(f.Path))
+		alwaysSend := base == "msmmmob.mdb" || base == "msmfmid.pmr"
+		if alwaysSend {
+			delta = append(delta, commit.FileSpec{Path: strings.ReplaceAll(f.Path, `\`, "/"), Hash: f.Hash, Size: f.Size})
+			continue
+		}
+		// .mxf: só se peer não tem.
+		if _, has := remoteHashes[f.Hash]; !has {
+			delta = append(delta, commit.FileSpec{Path: strings.ReplaceAll(f.Path, `\`, "/"), Hash: f.Hash, Size: f.Size})
+		}
+	}
+
+	if len(delta) == 0 {
+		slog.InfoContext(r.Context(), "sync-with: nada a enviar",
+			slog.String("module", logModule),
+			slog.String("event_id", "SYNC_NOOP"),
+			slog.String("peer_id", peerID),
+			slog.Int("remote_files", len(inv)))
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"message":   "ja em sync — nada a enviar",
+			"delta":     0,
+			"remote":    len(inv),
+			"sent_to":   peerID,
+			"committed": false,
+		})
+		return
+	}
+
+	// Monta commit + persiste como sent + envia direcionado.
+	c := &commit.Commit{
+		ID:        commit.NewID(),
+		Author:    s.user,
+		Message:   "sync manual com " + peerID + " em " + time.Now().Format("02/01/2006 15:04"),
+		Files:     delta,
+		CreatedAt: time.Now(),
+	}
+
+	mfiles := make([]manifest.CommitFile, 0, len(c.Files))
+	for _, f := range c.Files {
+		mfiles = append(mfiles, manifest.CommitFile{Path: f.Path, Hash: f.Hash, Size: f.Size})
+	}
+	if err := s.store.SaveCommit(manifest.Commit{
+		ID:        c.ID,
+		Author:    c.Author,
+		Message:   c.Message,
+		CreatedAt: c.CreatedAt,
+		Direction: manifest.DirectionSent,
+		Status:    manifest.CommitStatusAnnounced,
+		Files:     mfiles,
+	}); err != nil {
+		http.Error(w, "persist: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Envia em background (não bloqueia a UI). Usa Lifecycle ctx + wg
+	// pro shutdown coordenado.
+	opID, _ := logpkg.OpFromContext(r.Context())
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		bgCtx := s.lifecycle
+		if opID != "" {
+			bgCtx = logpkg.WithOp(bgCtx, opID)
+		}
+		if err := s.transport.SendTo(bgCtx, *target, c); err != nil {
+			slog.WarnContext(bgCtx, "sync-with SendTo falhou em background",
+				slog.String("module", logModule),
+				slog.String("event_id", "SYNC_SEND_FAIL"),
+				slog.String("commit_id", c.ID),
+				slog.String("peer_id", peerID),
+				slog.String("error", err.Error()))
+		}
+	}()
+
+	slog.InfoContext(r.Context(), "sync-with disparado",
+		slog.String("module", logModule),
+		slog.String("event_id", "SYNC_DISPATCH"),
+		slog.String("commit_id", c.ID),
+		slog.String("peer_id", peerID),
+		slog.Int("delta", len(delta)),
+		slog.Int("remote", len(inv)))
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"message":   "sincronizacao em andamento",
+		"delta":     len(delta),
+		"remote":    len(inv),
+		"sent_to":   peerID,
+		"commit_id": c.ID,
+		"committed": true,
 	})
 }
 

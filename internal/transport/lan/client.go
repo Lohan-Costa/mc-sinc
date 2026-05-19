@@ -94,6 +94,38 @@ func (t *Transport) fetch(ctx context.Context, peerAddr, commitID, path string) 
 	return resp.Body, nil
 }
 
+// fetchInventory consulta GET /peer/inventory?user=<requestingUser>
+// num peer remoto. Devolve a lista de .mxf que ele tem na pasta
+// 1-<requestingUser>/ — usado pelo handleSyncWith pra montar delta.
+func (t *Transport) fetchInventory(ctx context.Context, peerAddr, requestingUser string) ([]transport.InventoryItem, error) {
+	endpoint := fmt.Sprintf("http://%s/peer/inventory?user=%s",
+		peerAddr, url.QueryEscape(requestingUser))
+
+	invCtx, cancel := context.WithTimeout(ctx, announceTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(invCtx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build inventory req: %w", err)
+	}
+	req.Header.Set(userHeader, t.user)
+
+	resp, err := t.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get inventory: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("peer status %d: %s", resp.StatusCode, body)
+	}
+	var items []transport.InventoryItem
+	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+		return nil, fmt.Errorf("decode inventory: %w", err)
+	}
+	return items, nil
+}
+
 // pathEscapeSegments encoda cada segmento entre `/` separadamente.
 // PathEscape encoda `/` como %2F, que chi não desempacota para o
 // curinga `{*}`; precisamos preservar as barras literais.

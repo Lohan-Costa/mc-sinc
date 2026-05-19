@@ -159,6 +159,43 @@ func (s *Store) Delete(path string) error {
 	return err
 }
 
+// FilesUnderPrefix lista arquivos cujo path começa com o prefix dado.
+// Usado pelo /peer/inventory (peer A pergunta "o que você tem em
+// 1-A/?") e pelo /sync-with (sender lista seus próprios files em 1/).
+//
+// Prefix deve terminar em `/` quando representa um diretório, pra
+// evitar match acidental (ex: prefix "1" pegaria "1/foo" e "1-bar/x").
+func (s *Store) FilesUnderPrefix(prefix string) ([]File, error) {
+	rows, err := s.db.Query(`
+		SELECT path, hash, size, modified_at, status, updated_at
+		FROM files
+		WHERE path LIKE ?
+		ORDER BY path
+	`, prefix+"%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []File
+	for rows.Next() {
+		var (
+			f          File
+			modifiedAt int64
+			updatedAt  int64
+			status     string
+		)
+		if err := rows.Scan(&f.Path, &f.Hash, &f.Size, &modifiedAt, &status, &updatedAt); err != nil {
+			return nil, err
+		}
+		f.ModifiedAt = time.Unix(modifiedAt, 0)
+		f.UpdatedAt = time.Unix(updatedAt, 0)
+		f.Status = Status(status)
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
 // AllFilePaths devolve todos os paths registrados em `files`,
 // independente do status. Usado pela reconciliação no startup pra
 // detectar paths fantasmas (no manifest mas não no disco).

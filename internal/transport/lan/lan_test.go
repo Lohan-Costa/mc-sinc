@@ -275,6 +275,68 @@ func saveSent(t *testing.T, store *manifest.Store, c *commit.Commit) {
 	}
 }
 
+// Endpoint /peer/inventory devolve só .mxf recebidos do requester.
+func TestInventoryListaApenasMxfRecebidos(t *testing.T) {
+	bob := newNode(t, "bob")
+	// Bob tem em seu manifest:
+	//  - 1-alice/x.mxf (received do alice)
+	//  - 1-alice/y.mxf (received do alice)
+	//  - 1-alice/msmMMOB.mdb (received — mas filtrado: só .mxf)
+	//  - 1-charlie/z.mxf (received do charlie — não conta pra alice)
+	//  - 1/proprio.mxf (próprio — não conta)
+	now := time.Now()
+	for _, f := range []manifest.File{
+		{Path: "1-alice/x.mxf", Hash: "hashx", Size: 1, Status: manifest.StatusReceived, ModifiedAt: now},
+		{Path: "1-alice/y.mxf", Hash: "hashy", Size: 2, Status: manifest.StatusReceived, ModifiedAt: now},
+		{Path: "1-alice/msmMMOB.mdb", Hash: "hashmdb", Size: 3, Status: manifest.StatusReceived, ModifiedAt: now},
+		{Path: "1-charlie/z.mxf", Hash: "hashz", Size: 4, Status: manifest.StatusReceived, ModifiedAt: now},
+		{Path: "1/proprio.mxf", Hash: "hashpropr", Size: 5, Status: manifest.StatusCommitted, ModifiedAt: now},
+	} {
+		if err := bob.store.Upsert(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	resp, err := http.Get(bob.server.URL + "/peer/inventory?user=alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+
+	var items []transport.InventoryItem
+	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+		t.Fatal(err)
+	}
+	hashes := map[string]bool{}
+	for _, i := range items {
+		hashes[i.Hash] = true
+	}
+	if !hashes["hashx"] || !hashes["hashy"] {
+		t.Errorf("faltaram .mxf do alice: %v", hashes)
+	}
+	if hashes["hashmdb"] {
+		t.Errorf(".mdb nao deveria estar no inventory")
+	}
+	if hashes["hashz"] || hashes["hashpropr"] {
+		t.Errorf("inventory vazou arquivos de outro user/proprios: %v", hashes)
+	}
+}
+
+func TestInventorySemUserDevolve400(t *testing.T) {
+	bob := newNode(t, "bob")
+	resp, err := http.Get(bob.server.URL + "/peer/inventory")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("esperava 400, got %d", resp.StatusCode)
+	}
+}
+
 // Cenário real do log do Lohan: Windows tinha exe pré-fix, então o
 // manifest do sender armazenou f.Path com backslash. O receiver Mac
 // (com fix) pediu com forward slash. Sem normalize, FILE_NOT_ALLOWED.

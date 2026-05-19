@@ -62,6 +62,15 @@ func (s *stubTransport) ListPeers(ctx context.Context) ([]transport.Peer, error)
 	return nil, nil
 }
 
+func (s *stubTransport) SendTo(ctx context.Context, peer transport.Peer, c *commit.Commit) error {
+	// Mesma logica do Send mas registra peer alvo (não usado em testes atuais).
+	return s.Send(ctx, c)
+}
+
+func (s *stubTransport) Inventory(ctx context.Context, peer transport.Peer, requestingUser string) ([]transport.InventoryItem, error) {
+	return nil, nil // stub: peer não tem nada → tudo é delta
+}
+
 func (s *stubTransport) Routes() chi.Router { return chi.NewRouter() }
 func (s *stubTransport) Close() error       { return nil }
 
